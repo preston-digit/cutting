@@ -121,16 +121,72 @@ input UpdateWorkOrderInput {
   but new labels are created by `splitSerializedInventory`, not `createSerializedInventory`,
   so the new labels' custom fields are set with a follow-up `updateSerializedInventory` call.
 
-**Live data finding — format convention, not a schema constraint:** existing
-`Roll Length` / `Roll Width` values in this org are stored as free text like
-`"Length: 66.7 ft"` and `"Width: 15 ft "` (note trailing space in the sample),
-not bare numbers. These are `text`-type custom fields with no numeric
-validation, so the *app* owns the convention. **Decision:** to stay consistent
-with existing records (in case anything downstream in Digit parses this text),
-new/updated values are written in the same `"Length: {n} ft"` / `"Width: {n} ft"`
-format, and read back by stripping the label/unit and parsing the float. This is
-noted here per the "closest working path" instruction — flag if the team wants
-a different convention.
+**Live data finding — format distribution across ~29 roll labels (all
+existing serialized inventory in the org, `context: inventory`, `text`-type
+fields):** `Roll Length` / `Roll Width` are free text with no numeric
+validation, and existing values are **not** consistently formatted:
+
+| Roll Length values seen        | Roll Width values seen     |
+| ------------------------------- | --------------------------- |
+| `"Length: 66.7 ft"`              | `"Width: 15 ft "` (trailing space) |
+| `"Length: 40 ft"`                | `"Width: 15ft"` (no space before unit) |
+| `"Length: 100 ft"`               | `"Width: 15 ft"` (clean)    |
+| `"Length: 10 ft"`, `"Length: 80 ft"`, `"Length: 50 ft"` | `"Width:"` (empty, ~4 records) |
+| `"Length:"` (empty, ~4 records) | `"Width 5 ft"` (no colon, one `splt_` record) |
+| `"Length 8 ft"` (no colon, one `splt_` record) | |
+| `"xxx"` (one clearly-test record, `job_` prefix) | |
+
+No single canonical format — this is operator free-text, not a structured
+field, and past writes are inconsistent (with/without colon, with/without
+space, sometimes blank). Bare colon-space-number-space-unit
+(`"Length: {n} ft"` / `"Width: {n} ft"`) is the modal format among
+well-formed entries, so that's what this module writes on every create/update
+for consistency going forward; reads parse leniently (strip everything but the
+first number) rather than assuming the app's own format, since older/other
+records won't match it exactly.
+
+**Owner** is read-only display in this module (never written) — carrying
+whatever inconsistent text is already on the source record isn't this app's
+job to fix, and the spec never asks for it to write Owner.
+
+**Piece Type** (`singleSelect`) live option values, needed for step (c) of the
+commit:
+
+| option value              | id                                       |
+| -------------------------- | ---------------------------------------- |
+| `Piece Type: Mill Roll`     | `01a00b6a-8c59-75b6-83ba-a5f051a378d7`   |
+| `Piece Type: Cut Piece`     | `01a00b6a-8c59-75b6-83ba-ab8ed28fc9d2`   |
+| `Piece Type: Remnant`       | `01a00b6a-8c59-75b6-83ba-ac80a3d0f76c`   |
+| `Piece Type: Finished Rug`  | `01a00b6a-8c59-75b6-83ba-b111a306b8e6`   |
+
+The commit flow sets `fieldValueOptionId` = **Cut Piece** on the working piece
+label, **Remnant** on the side-remnant label (when created). The source label
+keeps its existing Piece Type untouched (it's still the same mill roll, just
+shorter).
+
+**Parent Roll** (`text`) is written on both new labels with the source's
+`scanCodeSerialNumber`, in the `"Parent: {scancode}"` format seen on the one
+live record that actually has a parent recorded (`"Parent: mi_1786932480681"`;
+most others are blank — `"Parent: "` — because they're original mill rolls
+with no parent).
+
+**Area reconciliation (confirmed exactly, not approximately):**
+
+```
+sourceArea            = sourceWidth × sourceLength
+cutArea               = cutWidth × cutLength                         (working piece)
+sideRemnantArea       = (sourceWidth − cutWidth) × cutLength         (0 if cutWidth == sourceWidth)
+remainingSourceArea   = sourceArea − cutArea − sideRemnantArea
+                       = sourceWidth × sourceLength − cutLength × sourceWidth
+                       = sourceWidth × (sourceLength − cutLength)
+```
+
+So after both splits the source label is left at **unchanged width,
+length − cutLength** — never a changed width — and
+`cutArea + sideRemnantArea + remainingSourceArea == sourceArea` exactly (up to
+float rounding), which is also what `quantityInStock` on the three labels sums
+to after the two `splitSerializedInventory` calls, since that mutation moves
+quantity rather than recomputing it independently.
 
 ## 5. Moving an inventory label to a bin
 
@@ -143,24 +199,52 @@ via `Query.warehouseLocations(locationCode: "<name>")`.
 
 ## 6. Printing a label
 
-**Not exposed as a direct API endpoint.** Searched the full schema for
-`print`/`label`/`pdf` fields on every type. Found only:
-`CustomLabelConfigurations` / `CustomLabelConfigurationDetails` / `LabelDetails`
-(label **template configuration**, not a render/print action), and three
-unrelated PDF generators (`generateSalesOrderPdf`, `generatePurchaseOrderPdf`,
-`generateQuotePdf` — sales order / PO / quote documents, not inventory labels).
-There is no `printSerializedInventoryLabel` or equivalent.
+**Not exposed as a direct API endpoint, and not a URL-addressable page either
+— corrected from an earlier wrong guess in this document.** Searched the full
+schema for `print`/`label`/`pdf` fields; found only `CustomLabelConfigurations`
+/ `CustomLabelConfigurationDetails` / `LabelDetails` (label **template
+configuration**, not a render/print action) and three unrelated PDF generators
+(`generateSalesOrderPdf`, `generatePurchaseOrderPdf`, `generateQuotePdf` — SO/
+PO/quote documents, not inventory labels). There is no
+`printSerializedInventoryLabel` or equivalent, direct or indirect.
 
-**Resolved path:** per the spec's fallback instruction, the "print" buttons open
-Digit's own UI in a new tab rather than faking a print via the API. The exact
-Digit frontend URL pattern for a serialized-inventory record's print view isn't
-discoverable from the GraphQL schema (it's a frontend route, not an API
-concept), so it's made configurable rather than hardcoded: `DIGIT_APP_BASE_URL`
-+ `DIGIT_INVENTORY_PRINT_PATH_TEMPLATE` (default
-`/inventory/{inventoryId}/print`) in the backend env, used to build the URL the
-frontend opens with `window.open(url, "_blank")`. **This template is a best
-guess and needs to be confirmed/corrected against the real Digit UI** — flagging
-prominently since it's the one piece not verifiable via the API.
+**How Digit actually prints a label (confirmed by the user, not discoverable
+via the API):** the label is rendered client-side inside Digit's own SPA and
+the browser print dialog is fired from a **"Reprint label" button on the
+serialized inventory record's drawer**. The URL never changes — it's always
+`https://app.digit-software.com/operations/inventory/serialized` — the drawer
+is opened by selecting the record inside that page, not by a deep link per
+record. So there is no per-record URL to construct, correct or otherwise.
+
+**Resolved path:** this module cannot open a specific record's print view or
+trigger printing itself. The post-commit UI instead:
+- Opens the serialized inventory list (`DIGIT_APP_BASE_URL` +
+  `/operations/inventory/serialized`) in a new tab.
+- Shows the new labels' **scancodes** prominently with a copy-to-clipboard
+  button (the value the operator needs to find the record — see barcode
+  finding below).
+- Displays a plain-language instruction: *"Find the label above in the list
+  that just opened, then click Reprint label."* Labeled honestly as a manual
+  step — the UI never implies the app printed anything.
+
+## Barcode vs. Label # (live finding from a physical label)
+
+The barcode on a printed label encodes the **scancode** string
+(`scanCodeSerialNumber`, e.g. `rcv_17873313121232`; other origins carry
+`splt_`, `job_`, or `mi_` prefixes per the live samples above), which is
+**distinct** from the human-readable **Label #** shown on the label
+(e.g. `Label #32` — this is `Inventory.scanCodeNumber`, a plain int).
+
+- **Scanner input must resolve against `scanCodeSerialNumber`** (via
+  `fetchBySerialNumber` / `inventory(scanCodeSerialNumber: ...)`), not
+  `scanCodeNumber` — the barcode never encodes the Label # digits alone.
+- The manual search fallback should accept either: try `scanCodeSerialNumber`
+  exact match first, then fall back to `scanCodeNumber` (parsed as int) or a
+  free-text `inventories(search: ...)` call for item-name search.
+- The source card and the post-commit scancode display both show **both**
+  identifiers — scancode (primary, copyable) and `Label #{scanCodeNumber}`
+  (secondary, human-readable) — so the operator can cross-check against the
+  physical label either way.
 
 ## Supporting findings (used across steps 5–7 of the build)
 
