@@ -372,11 +372,11 @@ export async function resolveScannedSerial(serialNumber) {
 }
 
 const SEARCH_INVENTORIES_QUERY = `
-  query ($search: String) {
+  query ($search: String, $first: Int!) {
     inventories(
       search: $search
       trackingMethod: [serialized]
-      connection: { first: 20 }
+      connection: { first: $first }
     ) {
       nodes {
         id
@@ -391,20 +391,48 @@ const SEARCH_INVENTORIES_QUERY = `
   }
 `;
 
+// A bare number typed/scanned as "Label #9" or "#9" or "9" all mean the same
+// lookup — strip the label prefix and punctuation so all three resolve.
+function normalizeLabelQuery(term) {
+  return (term || "")
+    .trim()
+    .replace(/^label/i, "")
+    .replace(/^\s*#\s*/, "")
+    .trim();
+}
+
+// inventories() has no scanCodeNumber filter, so an exact Label # lookup has
+// to pull enough of the org's serialized inventory to guarantee it's in the
+// page, then filter client-side by strict equality — never falls through to
+// a fuzzy text search, which was matching arbitrary substrings (timestamps
+// embedded in other labels' scancodes) and returning a wall of unrelated
+// results for a bare number.
+const LABEL_NUMBER_LOOKUP_PAGE_SIZE = 500;
+const TEXT_SEARCH_PAGE_SIZE = 20;
+
 /** Manual fallback search by label number (scanCodeNumber) or item name. */
 export async function searchInventories(term) {
-  const trimmed = (term || "").trim();
-  const asNumber = Number(trimmed);
-  const looksLikeLabelNumber = trimmed !== "" && !Number.isNaN(asNumber);
+  const normalized = normalizeLabelQuery(term);
+  const asNumber = Number(normalized);
+  const isExactLabelNumber = normalized !== "" && /^\d+$/.test(normalized);
 
-  if (looksLikeLabelNumber) {
-    // inventories() has no scanCodeNumber filter, so pull a page and filter client-side.
-    const data = await digitRequest(SEARCH_INVENTORIES_QUERY, { search: null });
-    const byLabelNumber = data.inventories.nodes.filter((n) => n.scanCodeNumber === asNumber);
-    if (byLabelNumber.length) return byLabelNumber;
+  if (isExactLabelNumber) {
+    const data = await digitRequest(SEARCH_INVENTORIES_QUERY, {
+      search: null,
+      first: LABEL_NUMBER_LOOKUP_PAGE_SIZE,
+    });
+    return data.inventories.nodes.filter(
+      (n) => n.scanCodeNumber === asNumber && n.quantityInStock > 0
+    );
   }
-  const data = await digitRequest(SEARCH_INVENTORIES_QUERY, { search: trimmed });
-  return data.inventories.nodes;
+
+  const data = await digitRequest(SEARCH_INVENTORIES_QUERY, {
+    search: normalized,
+    first: TEXT_SEARCH_PAGE_SIZE,
+  });
+  // Zero-quantity labels have already been fully consumed into a job and
+  // can't be cut from again — exclude them rather than show a dead end.
+  return data.inventories.nodes.filter((n) => n.quantityInStock > 0);
 }
 
 const INVENTORY_BY_ID_QUERY = `

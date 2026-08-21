@@ -8,6 +8,7 @@ import {
   completeWorkOrder,
   commitCut,
 } from "./api.js";
+import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
 
 const OPERATOR_STORAGE_KEY = "cutting.operatorName";
 const DIGIT_APP_BASE_URL = "https://app.digit-software.com"; // opened client-side; see SCHEMA_NOTES.md
@@ -63,6 +64,7 @@ export default function CutScreen({ nav, workOrderId }) {
   const [searchResults, setSearchResults] = useState(null);
   const [bomOverride, setBomOverride] = useState(false);
   const [areaMismatchAck, setAreaMismatchAck] = useState(false);
+  const [scannerOpen, setScannerOpen] = useState(false);
   const scanInputRef = useRef(null);
 
   // --- Cut entry state -------------------------------------------------------
@@ -117,25 +119,28 @@ export default function CutScreen({ nav, workOrderId }) {
     scanInputRef.current?.focus();
   }, []);
 
-  async function handleScanSubmit(e) {
-    e.preventDefault();
-    if (!scanInput.trim()) return;
+  // Shared by the typed/USB-wedge path (form submit) and the camera path
+  // (a successful barcode decode) — both end up resolving the same value
+  // the same way.
+  async function resolveScan(value) {
+    const trimmed = value.trim();
+    if (!trimmed) return;
     setScanning(true);
     setScanError(null);
     setSearchResults(null);
     try {
-      const result = await scanSerial(scanInput.trim());
+      const result = await scanSerial(trimmed);
       applySource(result);
     } catch (err) {
       // Not found by exact serial — try the manual search fallback automatically.
       try {
-        const results = await searchInventory(scanInput.trim());
+        const results = await searchInventory(trimmed);
         if (results.length === 1) {
           applySource(results[0]);
         } else if (results.length > 1) {
           setSearchResults(results);
         } else {
-          setScanError(`No label found for "${scanInput.trim()}"`);
+          setScanError(`No label found for "${trimmed}"`);
         }
       } catch (searchErr) {
         setScanError(searchErr.message);
@@ -143,6 +148,16 @@ export default function CutScreen({ nav, workOrderId }) {
     } finally {
       setScanning(false);
     }
+  }
+
+  function handleScanSubmit(e) {
+    e.preventDefault();
+    resolveScan(scanInput);
+  }
+
+  function handleCameraDetected(rawValue) {
+    setScannerOpen(false);
+    resolveScan(rawValue);
   }
 
   function applySource(inv) {
@@ -358,7 +373,21 @@ export default function CutScreen({ nav, workOrderId }) {
                 <button className="btn btn--secondary" type="submit" disabled={scanning}>
                   {scanning ? "Looking up…" : "Find"}
                 </button>
+                <button
+                  type="button"
+                  className="btn btn--secondary"
+                  title="Scan with camera"
+                  aria-label="Scan with camera"
+                  onClick={() => setScannerOpen(true)}
+                  disabled={scanning}
+                >
+                  📷
+                </button>
               </form>
+
+              {scannerOpen && (
+                <BarcodeScannerModal onDetected={handleCameraDetected} onClose={() => setScannerOpen(false)} />
+              )}
 
               {scanError && <div className="checklist-error-box" style={{ marginBottom: "var(--space-3)" }}>{scanError}</div>}
 

@@ -104,7 +104,20 @@ so it's the default recommendation above.
    revisit step 2 of the backend section if you change the GoDaddy domain or
    path after the fact.
 
-4. **Reload:** since this is a static bundle (no server-side process on
+4. **Serve over HTTPS — required, not optional.** The cut screen's camera
+   barcode scanner uses `getUserMedia()`, which browsers only allow in a
+   [secure context](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts):
+   HTTPS, or `localhost` for local dev. Loading the module over plain
+   `http://yourdomain.com/...` on GoDaddy will make the camera button fail
+   with "this connection isn't secure" every time — the USB-wedge-scanner
+   text path still works over HTTP, but the whole point of the camera path
+   is lost. Most GoDaddy cPanel hosting plans include a free SSL certificate
+   (AutoSSL) — in cPanel, go to **Security → SSL/TLS Status** and run
+   AutoSSL if it isn't already active, then also enable **Domains → Force
+   HTTPS Redirect** so an accidental `http://` link doesn't silently drop
+   back into an insecure context.
+
+5. **Reload:** since this is a static bundle (no server-side process on
    GoDaddy), there's nothing to restart — the new files are live as soon as
    they're uploaded. Hard-refresh the browser to bypass any cached bundle.
 
