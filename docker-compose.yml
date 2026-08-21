@@ -26,6 +26,9 @@ services:
       # Digit GraphQL credentials — SERVER-SIDE ONLY, never exposed to the browser.
       DIGIT_API_URL: ${DIGIT_API_URL:-https://api.digit-software.com/graphql}
       DIGIT_API_TOKEN: ${DIGIT_API_TOKEN:-}
+      CUTTING_STEP_NAME: ${CUTTING_STEP_NAME:-Cut to Size}
+      REMNANT_BIN_NAME: ${REMNANT_BIN_NAME:-Remnant Storage}
+      DIGIT_APP_BASE_URL: ${DIGIT_APP_BASE_URL:-https://app.digit-software.com}
     ports:
       - "${BACKEND_PORT:-4001}:4001"
     depends_on:

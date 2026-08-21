@@ -225,6 +225,35 @@ float rounding), which is also what `quantityInStock` on the three labels sums
 to after the two `splitSerializedInventory` calls, since that mutation moves
 quantity rather than recomputing it independently.
 
+## 4b. Live-discovered location constraints on split/pick (found building Step 4)
+
+Two business rules surfaced only by actually running the mutations against
+real (dummy) data — neither is visible in the schema shape itself:
+
+1. **`splitSerializedInventory` and `updateSerializedInventory` both reject a
+   `workCenter`-type `warehouseLocationId`.** Error text: `"Inventory can only
+   be split to a bin location"` / `"Inventory can only be assigned to a bin
+   location"`. Only `type: bin` locations are valid targets. A work order's
+   own `WorkOrder.warehouseLocation` is typically a `workCenter` (e.g.
+   "Fabrication Floor" in this org) — inventory can never be placed there
+   directly.
+2. **`pickJobItem` requires the inventory's bin to share the same `Address`
+   as the job's `manufacturingLocationAddress`** — not to sit in the work
+   order's specific `warehouseLocation`. Error text when it doesn't:
+   `"Materials must be picked from the manufacturing location assigned to the
+   MO."` `WarehouseLocation.address` gives each bin's address; multiple bins
+   can share one address (in this org, `FAB-STAGING` shares "Warehouse 1 -
+   Fabrication" with the "Fabrication Floor" work center; `WH2-RACK-*` bins
+   belong to a different address, "Warehouse 2 - Storage", and are **not**
+   pickable into this job even though they're valid split targets).
+
+**Resolved path:** the commit flow resolves a bin via
+`warehouseLocations(addressId: job.manufacturingLocationAddress.id, types: [bin])`
+and splits the working piece directly into that bin — no separate "move"
+step needed once the right bin is targeted from the start. This is
+resolved fresh per job (not cached long-term), since different jobs can have
+different manufacturing addresses.
+
 ## 5. Moving an inventory label to a bin
 
 **Exposed.** Same `updateSerializedInventory` mutation, just the
