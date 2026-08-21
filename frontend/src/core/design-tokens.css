@@ -1,0 +1,69 @@
+/* Pinned design tokens — REUSABLE CORE. Mirror Digit's ERP shell so embedded
+   modules look native. Do NOT re-style per screen; consume these tokens
+   everywhere. See DESIGN.md. */
+
+:root {
+  /* Type */
+  --font-sans: "Inter", system-ui, -apple-system, sans-serif;
+  --fs-sm: 12px;
+  --fs-base: 13px;
+  --fs-lg: 15px;
+
+  /* Palette */
+  --color-bg: #ffffff;
+  --color-fg: #1a1d21;
+  --color-muted: #6b7280;
+  --color-border: #e5e7eb;
+  --color-row-hover: #f7f8fa;
+  --color-accent: #2563eb;
+
+  /* Status pill colors */
+  --status-active-bg: #e7f5ec;
+  --status-active-fg: #166534;
+  --status-pending-bg: #fef3c7;
+  --status-pending-fg: #92400e;
+  --status-closed-bg: #f1f5f9;
+  --status-closed-fg: #475569;
+
+  /* Layout */
+  --row-height: 40px;
+  --space-1: 4px;
+  --space-2: 8px;
+  --space-3: 12px;
+  --space-4: 16px;
+  --radius: 6px;
+}
+
+/* No outer chrome — the host ERP shell provides the frame. */
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  font-family: var(--font-sans);
+  font-size: var(--fs-base);
+  color: var(--color-fg);
+  background: var(--color-bg);
+}
+
+.pill {
+  display: inline-block;
+  padding: 2px var(--space-2);
+  border-radius: 999px;
+  font-size: var(--fs-sm);
+  font-weight: 600;
+  line-height: 1.6;
+}
+.pill--active { background: var(--status-active-bg); color: var(--status-active-fg); }
+.pill--pending { background: var(--status-pending-bg); color: var(--status-pending-fg); }
+.pill--closed { background: var(--status-closed-bg); color: var(--status-closed-fg); }
+
+.row {
+  display: flex;
+  align-items: center;
+  height: var(--row-height);
+  padding: 0 var(--space-3);
+  border-bottom: 1px solid var(--color-border);
+  cursor: pointer;
+}
+.row:hover { background: var(--color-row-hover); }
+.muted { color: var(--color-muted); }
+.link { color: var(--color-accent); cursor: pointer; }

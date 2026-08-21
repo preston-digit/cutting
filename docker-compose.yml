@@ -1,0 +1,52 @@
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-erp}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-erp_password}
+      POSTGRES_DB: ${POSTGRES_DB:-erp_module}
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-erp} -d ${POSTGRES_DB:-erp_module}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    environment:
+      BACKEND_PORT: ${BACKEND_PORT:-4001}
+      DATABASE_URL: ${DATABASE_URL:-postgresql://erp:erp_password@db:5432/erp_module}
+      CORS_ORIGIN: ${CORS_ORIGIN:-http://localhost:3000}
+      # Digit GraphQL credentials — SERVER-SIDE ONLY, never exposed to the browser.
+      DIGIT_API_URL: ${DIGIT_API_URL:-https://api.digit-software.com/graphql}
+      DIGIT_API_TOKEN: ${DIGIT_API_TOKEN:-}
+    ports:
+      - "${BACKEND_PORT:-4001}:4001"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/src:/app/src
+      # Mounted so new migrations are picked up on restart without a rebuild.
+      - ./backend/db:/app/db
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      VITE_API_URL: ${VITE_API_URL:-http://localhost:4001}
+    ports:
+      - "${FRONTEND_PORT:-3000}:3000"
+    depends_on:
+      - backend
+    volumes:
+      - ./frontend/src:/app/src
+
+volumes:
+  postgres-data:
