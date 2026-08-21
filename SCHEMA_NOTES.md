@@ -10,6 +10,43 @@ orders before the app exists to use them correctly.
 No blockers found. All six capabilities are exposed except label printing, which
 is UI-only (flagged below, not faked).
 
+## Core architecture: this module is the sole keeper of dimensional truth
+
+Digit's inventory quantity for a serialized roll is **ft² only** —
+`Inventory.quantityInStock` is a single scalar area. `Roll Length` and
+`Roll Width` exist **solely** as this org's custom fields; Digit has no native
+concept of a roll's linear dimensions, and `splitSerializedInventory` moves
+`quantityInStock` between labels **without touching either label's dimension
+custom fields at all** (confirmed by the mutation's own input/output shape in
+§1 — it takes `quantityToSplit`, nothing about width/length).
+
+That means **every label this module creates or shortens carries a
+Digit-native area that's correct automatically (the split mutation handles
+that), but dimensions that are correct only if this module writes them** — and
+if it doesn't, in Digit's eyes a label just has an area with no length/width
+at all, silently wrong for every rug cut from it downstream. Consequently:
+
+- Every commit writes dimensions to **all three** affected labels in the same
+  operation that moves their quantity — the working piece, the side remnant
+  (when one exists), and **the source label itself**, not just the two new
+  ones. The source's area changes via the split call; its `Roll Length` must
+  change in the same commit or it silently goes stale (still says the old,
+  now-wrong length).
+- This is enforced in code, not left to the operator to remember: the commit
+  step that performs a split is always immediately followed, in the same
+  step group, by the dimension write for that label — see Step 4/6 build
+  notes for the exact call sequence and the partial-failure reporting this
+  requires (a split can succeed while its paired dimension write fails, and
+  the UI must say so explicitly rather than silently leaving a label
+  area-correct-but-dimension-stale).
+- Because Digit itself has no way to detect a dimension/area mismatch (it
+  doesn't relate the two), this module also validates on every scan: if the
+  scanned label's `quantityInStock` disagrees with `rollLength × rollWidth` by
+  more than 1%, that's a label whose dimensions drifted out of sync with its
+  area — almost certainly because it was split by hand in Digit's own UI
+  outside this module, bypassing the paired write above. The operator sees
+  both figures and must explicitly confirm before cutting from it.
+
 ## 1. Split a serialized inventory label into two labels with specified quantities
 
 **Exposed.** `Mutation.splitSerializedInventory(input: SplitSerializedInventoryInput!): SplitSerializedInventoryResponse!`
@@ -121,10 +158,21 @@ input UpdateWorkOrderInput {
   but new labels are created by `splitSerializedInventory`, not `createSerializedInventory`,
   so the new labels' custom fields are set with a follow-up `updateSerializedInventory` call.
 
-**Live data finding — format distribution across ~29 roll labels (all
-existing serialized inventory in the org, `context: inventory`, `text`-type
-fields):** `Roll Length` / `Roll Width` are free text with no numeric
-validation, and existing values are **not** consistently formatted:
+**Correction — the ~29 live roll labels surveyed below are all dummy/test data
+entered during setup, not a real house convention.** The inconsistent
+`"Length: 66.7 ft"` / `"Length 8 ft"` / blank formats are noise, not a
+standard to match. **Decision: write bare numbers.** `Roll Length` and
+`Roll Width` are written as plain numeric strings (`"66.7"`, `"15"`), no
+label, no unit suffix, no colon. `Parent Roll` is written as the bare source
+scancode (`"mi_1786932480681"`), not `"Parent: {scancode}"`.
+
+Reads stay lenient regardless (strip anything that isn't part of a number and
+parse the first float found) so pre-existing malformed/labelled records
+(`"Length: 40 ft"`, empty strings, `"xxx"`) don't crash the source card or the
+out-of-sync check below — only new writes are guaranteed clean.
+
+For reference, the raw distribution actually observed (dummy data, not a
+convention to preserve):
 
 | Roll Length values seen        | Roll Width values seen     |
 | ------------------------------- | --------------------------- |
@@ -135,15 +183,6 @@ validation, and existing values are **not** consistently formatted:
 | `"Length:"` (empty, ~4 records) | `"Width 5 ft"` (no colon, one `splt_` record) |
 | `"Length 8 ft"` (no colon, one `splt_` record) | |
 | `"xxx"` (one clearly-test record, `job_` prefix) | |
-
-No single canonical format — this is operator free-text, not a structured
-field, and past writes are inconsistent (with/without colon, with/without
-space, sometimes blank). Bare colon-space-number-space-unit
-(`"Length: {n} ft"` / `"Width: {n} ft"`) is the modal format among
-well-formed entries, so that's what this module writes on every create/update
-for consistency going forward; reads parse leniently (strip everything but the
-first number) rather than assuming the app's own format, since older/other
-records won't match it exactly.
 
 **Owner** is read-only display in this module (never written) — carrying
 whatever inconsistent text is already on the source record isn't this app's
@@ -164,11 +203,9 @@ label, **Remnant** on the side-remnant label (when created). The source label
 keeps its existing Piece Type untouched (it's still the same mill roll, just
 shorter).
 
-**Parent Roll** (`text`) is written on both new labels with the source's
-`scanCodeSerialNumber`, in the `"Parent: {scancode}"` format seen on the one
-live record that actually has a parent recorded (`"Parent: mi_1786932480681"`;
-most others are blank — `"Parent: "` — because they're original mill rolls
-with no parent).
+**Parent Roll** (`text`) is written on both new labels as the bare source
+`scanCodeSerialNumber` (e.g. `mi_1786932480681`, no `"Parent: "` prefix — see
+correction above).
 
 **Area reconciliation (confirmed exactly, not approximately):**
 
@@ -272,3 +309,11 @@ The barcode on a printed label encodes the **scancode** string
 - **Units confirmed live:** the roll items (`Heirloom / Meadow`, etc.) are
   `trackingMethod: serialized` with `defaultStockUom.name: "Square Feet"` —
   matches the domain's ft² quantities.
+- **Local audit trail as a backstop for Digit write failures:** `cut_events`
+  stores the *parsed numeric* source/working-piece/remnant dimensions (not
+  just the raw label text) alongside the raw Digit responses for each step.
+  Given the sole-keeper-of-dimensional-truth architecture above, if a
+  dimension write to Digit fails after its paired split succeeds, this local
+  row is the only place the intended correct dimensions survive — it's what
+  the "needs manual repair in Digit" checklist message points the operator
+  (or a follow-up script) back to.
