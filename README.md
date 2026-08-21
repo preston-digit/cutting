@@ -198,10 +198,43 @@ Plus whatever each mounted feature adds (the example adds `/api/projects/*`).
 
 See [.env.example](.env.example). Key ones:
 
-| Variable          | Purpose                                                |
-| ----------------- | ------------------------------------------------------ |
-| `DATABASE_URL`    | Backend → Postgres connection string                   |
-| `DIGIT_API_URL`   | Digit GraphQL endpoint                                 |
-| `DIGIT_API_TOKEN` | Digit bearer token — **server-side only**              |
-| `CORS_ORIGIN`     | Origin allowed by the backend's CORS policy            |
-| `VITE_API_URL`    | Base URL the browser uses to call **our** backend      |
+| Variable              | Purpose                                                |
+| --------------------- | ------------------------------------------------------ |
+| `DATABASE_URL`         | Backend → Postgres connection string                   |
+| `DIGIT_API_URL`        | Digit GraphQL endpoint                                 |
+| `DIGIT_API_TOKEN`      | Digit bearer token — **server-side only**              |
+| `CORS_ORIGIN`          | Origin allowed by the backend's CORS policy            |
+| `VITE_API_URL`         | Base URL the browser uses to call **our** backend      |
+| `CUTTING_STEP_NAME`    | Digit routing step the cutting queue watches (default `Cut to Size`) |
+| `REMNANT_BIN_NAME`     | Default bin for side remnants (changeable per-cut in the UI) |
+| `DIGIT_APP_BASE_URL`   | Digit's own frontend — used for the "open serialized inventory list to reprint a label" link (see SCHEMA_NOTES.md) |
+
+## Smoke test (cutting commit flow)
+
+`backend/scripts/smoke-cut.js` is a regression check for the commit flow — it
+runs a real commit against the running backend's actual HTTP endpoint (not a
+reimplementation), then verifies the result independently against Digit and
+the local `cut_events` table: three labels at the right ft², dimensions
+written on all three (working piece, remnant, and the shortened source),
+areas reconciling exactly, the working piece picked into the MO at the right
+quantity, the work order moved to `IN_PROGRESS`, and a `cut_events` row
+carrying the raw Digit responses for each step.
+
+This is the way to prove the backend still works after a change without
+clicking through the UI — run it any time you touch `backend/src/features/cutting/`.
+
+```bash
+docker compose exec \
+  -e SMOKE_WORK_ORDER_ID=<a real, not-yet-completed work order id> \
+  -e SMOKE_SOURCE_INVENTORY_ID=<a serialized label id with Roll Length/Width set> \
+  -e SMOKE_CUT_WIDTH=5 \
+  -e SMOKE_CUT_LENGTH=5 \
+  -e SMOKE_REMNANT_BIN_ID=<a bin id — only required if cutWidth < the source's Roll Width> \
+  backend node scripts/smoke-cut.js
+```
+
+It prints a `PASS`/`FAIL` line per check and a final pass/fail summary, and
+exits non-zero on any failure (suitable for CI). **It performs a real cut
+against real Digit data** — point it at dummy/test records, not production
+inventory, since it actually splits the source label and picks the working
+piece into the given MO.

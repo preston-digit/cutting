@@ -38,6 +38,7 @@ services:
       - ./backend/src:/app/src
       # Mounted so new migrations are picked up on restart without a rebuild.
       - ./backend/db:/app/db
+      - ./backend/scripts:/app/scripts
 
   frontend:
     build: ./frontend

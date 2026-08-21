@@ -254,6 +254,17 @@ step needed once the right bin is targeted from the start. This is
 resolved fresh per job (not cached long-term), since different jobs can have
 different manufacturing addresses.
 
+**Does the remnant have the same address restriction? No — confirmed live.**
+Split a test quantity to `WH2-RACK-A` (address "Warehouse 2 - Storage") from a
+label whose job's manufacturing address is "Warehouse 1 - Fabrication" — it
+succeeded with no error. The address constraint above is specific to
+`pickJobItem` (because the working piece gets picked into the job); the
+remnant is never picked into anything, so `splitSerializedInventory`'s only
+requirement for it is `type: bin` — any bin, any address. **`REMNANT_BIN_NAME`
+does not need to be under the job's manufacturing address** and can be a
+purely physical/operational choice (wherever remnants are actually stored on
+the floor), independent per-cut and unrelated to which job produced it.
+
 ## 5. Moving an inventory label to a bin
 
 **Exposed.** Same `updateSerializedInventory` mutation, just the
