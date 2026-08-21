@@ -311,6 +311,8 @@ const WORK_ORDER_DETAIL_QUERY = `
         documentNumber
         targetQuantity
         notes
+        createdOn
+        createdBy { id profile { fullName } }
         item { id name sku }
         manufacturingLocationAddress { id title }
         bom {

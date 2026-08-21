@@ -89,6 +89,8 @@ router.get("/work-orders/:id", async (req, res, next) => {
       itemSku: wo.job?.item?.sku,
       targetQuantity: wo.job?.targetQuantity,
       moNotes: wo.job?.notes || null,
+      createdBy: wo.job?.createdBy?.profile?.fullName || null,
+      createdOn: wo.job?.createdOn || null,
       salesOrderNumber: wo.job?.salesOrder?.orderNumber || null,
       customerName: wo.job?.salesOrder?.customer?.name || null,
       shipByDate: wo.job?.salesOrder?.requestedDeliveryDate || null,
