@@ -124,6 +124,7 @@ body {
 /* --- Cards / layout ----------------------------------------------------- */
 .card {
   background: var(--color-surface);
+  border: 1px solid var(--color-border);
   border-radius: var(--radius-card);
   padding: var(--space-4);
 }
@@ -152,12 +153,14 @@ body {
   width: 36px;
   height: 36px;
   border-radius: var(--radius-input);
-  background: var(--color-surface-2);
+  background: var(--status-blue-bg-solid);
+  color: var(--status-blue-fg);
   display: flex;
   align-items: center;
   justify-content: center;
   flex-shrink: 0;
   font-size: var(--fs-lg);
+  font-weight: 600;
 }
 .sidebar-item-name { font-weight: 600; }
 .sidebar-item-sku { color: var(--color-muted); font-size: var(--fs-sm); }
@@ -165,9 +168,10 @@ body {
 .progress-bar-track {
   height: 6px;
   border-radius: 999px;
-  background: var(--color-surface-2);
+  background: var(--color-border);
   overflow: hidden;
   flex: 1;
+  min-width: 40px;
 }
 .progress-bar-fill {
   height: 100%;

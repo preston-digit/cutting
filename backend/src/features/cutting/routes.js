@@ -138,13 +138,18 @@ router.get("/bins", async (req, res, next) => {
   }
 });
 
-// GET /api/cutting/bins/default — resolves REMNANT_BIN_NAME
-router.get("/bins/default", async (_req, res, next) => {
+// GET /api/cutting/bins/default — resolves REMNANT_BIN_NAME, a convenience
+// default only. Not finding it is a config/data fact, not a server error —
+// this is a 404 with a readable message, never a 500, so a missing/wrong
+// REMNANT_BIN_NAME never breaks the screen: the operator just picks a bin.
+router.get("/bins/default", async (_req, res) => {
   try {
     const bin = await resolveWarehouseLocationByName(REMNANT_BIN_NAME);
     res.json({ id: bin.id, name: bin.locationCode });
   } catch (err) {
-    next(err);
+    res.status(404).json({
+      error: `REMNANT_BIN_NAME "${REMNANT_BIN_NAME}" does not match any bin in this org — pick a remnant bin manually.`,
+    });
   }
 });
 

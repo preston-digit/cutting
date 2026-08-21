@@ -69,7 +69,6 @@ export default function CutScreen({ nav, workOrderId }) {
   const [cutWidth, setCutWidth] = useState("");
   const [cutLength, setCutLength] = useState("");
   const [remnantBin, setRemnantBin] = useState(null); // { id, name }
-  const [binSearchOpen, setBinSearchOpen] = useState(false);
   const [binSearchResults, setBinSearchResults] = useState([]);
 
   // --- Commit state -----------------------------------------------------------
@@ -83,17 +82,35 @@ export default function CutScreen({ nav, workOrderId }) {
   }, [operatorName]);
 
   useEffect(() => {
+    let cancelled = false;
     getWorkOrder(workOrderId)
-      .then(setWo)
-      .catch((err) => setLoadError(err.message));
+      .then((data) => !cancelled && setWo(data))
+      .catch((err) => !cancelled && setLoadError(err.message));
+    return () => {
+      cancelled = true;
+    };
   }, [workOrderId]);
 
+  // Guarded with a ref (not just the [] dep array) so React 18 StrictMode's
+  // dev-only double-invoke of effects — mount, cleanup, mount again, on the
+  // same instance — can't fire this network call twice. REMNANT_BIN_NAME is
+  // a convenience default only: if it doesn't resolve to a real bin (common
+  // — it's an env var guess, not guaranteed to exist in this org), that's
+  // not an error, the operator just picks one from the full list below.
+  const binsInitialized = useRef(false);
   useEffect(() => {
+    if (binsInitialized.current) return;
+    binsInitialized.current = true;
+    let cancelled = false;
+    searchBins("").then((list) => !cancelled && setBinSearchResults(list));
     getDefaultBin()
-      .then(setRemnantBin)
+      .then((bin) => !cancelled && setRemnantBin(bin))
       .catch(() => {
-        /* no default configured for this org yet — operator must pick one */
+        /* no default configured for this org, or it doesn't match a real bin — leave unselected */
       });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -173,10 +190,6 @@ export default function CutScreen({ nav, workOrderId }) {
       exceedsLength,
     };
   }, [cutWidth, cutLength, source]);
-
-  async function handleBinSearch(q) {
-    setBinSearchResults(await searchBins(q));
-  }
 
   async function handleCommit() {
     if (!cut || !source) return;
@@ -277,24 +290,57 @@ export default function CutScreen({ nav, workOrderId }) {
 
       <div className="two-col">
         <div className="card">
-          <div style={{ marginBottom: "var(--space-4)" }}>
-            <div className="field">
-              <label className="field-label">Operator</label>
-              <input
-                className="input"
-                placeholder="Your name"
-                value={operatorName}
-                onChange={(e) => setOperatorName(e.target.value)}
-                style={{ maxWidth: 240 }}
-              />
+          <div className="section-label">Job details</div>
+          <div className="kv-list" style={{ paddingBottom: "var(--space-4)", marginBottom: "var(--space-4)", borderBottom: "1px solid var(--color-border)" }}>
+            <div className="kv-row">
+              <span className="kv-label">Work order</span>
+              <span className="kv-value">WO{wo.workOrderNumber}</span>
             </div>
+            <div className="kv-row">
+              <span className="kv-label">Manufacturing order</span>
+              <span className="kv-value">{wo.moNumber}</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">Item</span>
+              <span className="kv-value">{wo.itemName} ({wo.itemSku})</span>
+            </div>
+            <div className="kv-row">
+              <span className="kv-label">Target quantity</span>
+              <span className="kv-value mono">{wo.targetQuantity} ea</span>
+            </div>
+            {wo.salesOrderNumber && (
+              <div className="kv-row">
+                <span className="kv-label">Sales order</span>
+                <span className="kv-value">
+                  {wo.salesOrderNumber}
+                  {wo.customerName ? ` — ${wo.customerName}` : ""}
+                </span>
+              </div>
+            )}
+            {wo.shipByDate && (
+              <div className="kv-row">
+                <span className="kv-label">Ship by</span>
+                <span className="kv-value">{new Date(wo.shipByDate).toLocaleDateString()}</span>
+              </div>
+            )}
+            {wo.moNotes && (
+              <div className="kv-row">
+                <span className="kv-label">MO notes</span>
+                <span className="kv-value">{wo.moNotes}</span>
+              </div>
+            )}
           </div>
 
-          {wo.moNotes && (
-            <div className="warning-box" style={{ background: "var(--color-surface-2)", border: "1px solid var(--color-border)", color: "var(--color-fg)" }}>
-              <strong>MO notes:</strong> {wo.moNotes}
-            </div>
-          )}
+          <div className="field">
+            <label className="field-label">Operator</label>
+            <input
+              className="input"
+              placeholder="Your name"
+              value={operatorName}
+              onChange={(e) => setOperatorName(e.target.value)}
+              style={{ maxWidth: 240 }}
+            />
+          </div>
 
           {!committed && (
             <>
@@ -432,21 +478,13 @@ export default function CutScreen({ nav, workOrderId }) {
                             value={remnantBin?.id || ""}
                             onChange={(e) => {
                               const chosen = binSearchResults.find((b) => b.id === e.target.value);
-                              if (chosen) setRemnantBin(chosen);
-                            }}
-                            onFocus={() => {
-                              if (!binSearchOpen) {
-                                setBinSearchOpen(true);
-                                handleBinSearch("");
-                              }
+                              setRemnantBin(chosen || null);
                             }}
                           >
-                            {remnantBin && <option value={remnantBin.id}>{remnantBin.name}</option>}
-                            {binSearchResults
-                              .filter((b) => b.id !== remnantBin?.id)
-                              .map((b) => (
-                                <option key={b.id} value={b.id}>{b.name}</option>
-                              ))}
+                            <option value="" disabled>Select a bin…</option>
+                            {binSearchResults.map((b) => (
+                              <option key={b.id} value={b.id}>{b.name}</option>
+                            ))}
                           </select>
                         </div>
                       ) : (
@@ -454,6 +492,9 @@ export default function CutScreen({ nav, workOrderId }) {
                           Full-width crosscut — no side remnant. Source label continues at{" "}
                           <span className="mono">{cut.sourceWidthAfter} × {cut.sourceLengthAfter} ft</span>.
                         </div>
+                      )}
+                      {cut.hasSideRemnant && !remnantBin && (
+                        <div className="warning-box" style={{ marginBottom: "var(--space-2)" }}>Select a remnant bin</div>
                       )}
                       <button
                         className="btn btn--primary"
@@ -528,7 +569,7 @@ export default function CutScreen({ nav, workOrderId }) {
 
         <div className="card">
           <div className="sidebar-item-card">
-            <div className="sidebar-item-icon">▮</div>
+            <div className="sidebar-item-icon">{(wo.itemName || "?").slice(0, 1).toUpperCase()}</div>
             <div>
               <div className="sidebar-item-name">{wo.itemName}</div>
               <div className="sidebar-item-sku">{wo.itemSku}</div>
@@ -536,7 +577,6 @@ export default function CutScreen({ nav, workOrderId }) {
           </div>
 
           <div className="section-label">Current job</div>
-          <div style={{ fontSize: "var(--fs-lg)", fontWeight: 600, marginBottom: "var(--space-1)" }}>Cut to size</div>
           <div className="progress-bar-row">
             <div className="progress-bar-track">
               <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
@@ -548,10 +588,6 @@ export default function CutScreen({ nav, workOrderId }) {
             <div className="kv-row">
               <span className="kv-label">Location</span>
               <span className="kv-value">{wo.binName}</span>
-            </div>
-            <div className="kv-row">
-              <span className="kv-label">Links to</span>
-              <span className="kv-value link">{wo.moNumber}</span>
             </div>
             <div className="kv-row">
               <span className="kv-label">Work center</span>
