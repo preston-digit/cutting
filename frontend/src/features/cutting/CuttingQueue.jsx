@@ -45,8 +45,9 @@ export default function CuttingQueue({ nav }) {
       <div className="page-title-row">
         <h1 className="page-title">Cutting queue</h1>
       </div>
-      <div className="page-subtitle">
-        Work orders at the Cut to Size step, sorted by ship-by date. Refreshes every 30s.
+      <div className="page-subtitle" style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <span>Work orders at the Cut to Size step, sorted by ship-by date. Refreshes every 30s.</span>
+        <span className="link" onClick={() => nav("cutting.history")}>Cut history</span>
       </div>
 
       {error && <div className="checklist-error-box" style={{ marginBottom: "var(--space-4)" }}>{error}</div>}
