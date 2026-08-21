@@ -4,7 +4,9 @@ import { pool, runMigrations } from "./core/db.js";
 import { features } from "./features/index.js";
 
 const app = express();
-const PORT = process.env.BACKEND_PORT || 4001;
+// Heroku injects PORT and requires binding it directly; BACKEND_PORT is the
+// docker-compose/local-dev name. See DEPLOY.md.
+const PORT = process.env.PORT || process.env.BACKEND_PORT || 4001;
 const CORS_ORIGIN = process.env.CORS_ORIGIN || "http://localhost:3000";
 
 // Allow requests from the frontend dev server (and the host app that embeds it).
@@ -40,8 +42,8 @@ app.use((err, _req, res, _next) => {
 // Apply migrations before serving so the schema each feature needs exists.
 runMigrations()
   .then(() => {
-    app.listen(PORT, () => {
-      console.log(`Backend API listening on http://localhost:${PORT}`);
+    app.listen(PORT, "0.0.0.0", () => {
+      console.log(`Backend API listening on 0.0.0.0:${PORT}`);
     });
   })
   .catch((err) => {

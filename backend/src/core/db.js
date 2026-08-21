@@ -10,8 +10,17 @@ import { fileURLToPath } from "node:url";
 
 const { Pool } = pkg;
 
+// Heroku Postgres requires SSL but signs with a cert chain the pg client
+// won't validate by default; DATABASE_SSL=true opts into
+// `rejectUnauthorized: false` for that case. Leave unset for local
+// docker-compose Postgres, which doesn't use SSL at all. See DEPLOY.md.
+const useSsl = process.env.DATABASE_SSL === "true";
+
 export const pool = process.env.DATABASE_URL
-  ? new Pool({ connectionString: process.env.DATABASE_URL })
+  ? new Pool({
+      connectionString: process.env.DATABASE_URL,
+      ...(useSsl ? { ssl: { rejectUnauthorized: false } } : {}),
+    })
   : null;
 
 export function assertDb() {
