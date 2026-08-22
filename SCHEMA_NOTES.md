@@ -188,6 +188,34 @@ convention to preserve):
 whatever inconsistent text is already on the source record isn't this app's
 job to fix, and the spec never asks for it to write Owner.
 
+**Read-side prefix stripping applies to every text-ish custom field, not
+just Roll Length/Width.** Live-confirmed: `Owner` values are stored as
+`"Owner: The Dixie Group"` and `Parent Roll` values as `"Parent:
+mi_1786932480681"` — both redundantly repeat (a word of) the field's own
+name as a prefix, same pattern as the Roll Length/Width noise above, just
+without a trailing unit. `Piece Type`'s `singleSelect` **option values**
+have this baked in even harder — the options themselves are literally named
+`"Piece Type: Cut Piece"` etc. in this org's config, not something written
+per-record. `readInventoryCustomFields()` (`backend/src/features/cutting/digitOps.js`)
+strips a leading `"{field name}: "` or `"{any word of the field name}: "`
+generically by field name rather than hardcoding per-field, so `owner` reads
+`"The Dixie Group"`, `parentRoll` reads `"mi_1786932480681"`, and `pieceType`
+reads `"Cut Piece"` — all prefix-free.
+
+**A live 1,000 ft² area/dimension mismatch on label #9 (`mi_1787021264103`,
+`Heirloom / Wrought Iron`) was investigated and is confirmed to be pre-existing
+dummy data, not a parsing bug.** Direct query of the raw field showed
+`Roll Length` stored as exactly `"89"` — no hidden/truncated leading digit.
+The label's very first snapshot in this project (before this module ever
+wrote to it) already showed `quantityInStock=500` against `Roll Length=100 ×
+Roll Width=15 = 1500`, a 1000 ft² gap. That gap is invariant under this
+module's own split+dimension-write pairing — every cut removes
+`cutLength × width` from both the real quantity and the implied area
+identically, so `impliedArea − quantity` never changes as a result of
+correct writes. The area-mismatch warning is working as designed;
+1,000 ft² of it is inherited from how the dummy data was originally seeded,
+not introduced by a bug.
+
 **Piece Type** (`singleSelect`) live option values, needed for step (c) of the
 commit:
 

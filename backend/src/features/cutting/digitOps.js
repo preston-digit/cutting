@@ -72,10 +72,29 @@ export function parseDimensionText(text) {
   return match ? Number(match[0]) : null;
 }
 
+// Some fields' stored/option values redundantly repeat the field's own name
+// as a prefix — and not always the FULL name: live-confirmed cases are
+// "Owner: The Dixie Group" (full name "Owner"), "Parent: mi_..." (field is
+// "Parent Roll", but the prefix is only its first word), and Piece Type's
+// option values are literally named "Piece Type: Cut Piece" etc. Checking
+// the full field name AND each of its individual words catches all three
+// without hardcoding any one field.
+function stripFieldNamePrefix(fieldName, value) {
+  if (typeof value !== "string") return value;
+  const candidates = [fieldName, ...fieldName.split(/\s+/).filter(Boolean)];
+  for (const candidate of candidates) {
+    const escaped = candidate.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const pattern = new RegExp(`^\\s*${escaped}\\s*:\\s*`, "i");
+    if (pattern.test(value)) return value.replace(pattern, "").trim();
+  }
+  return value.trim();
+}
+
 export function readInventoryCustomFields(inventory) {
   const byName = {};
   for (const f of inventory.customFields || []) {
-    byName[f.fieldName] = f.fieldValueText ?? f.fieldValueOption?.value ?? null;
+    const raw = f.fieldValueText ?? f.fieldValueOption?.value ?? null;
+    byName[f.fieldName] = stripFieldNamePrefix(f.fieldName, raw);
   }
   return {
     rollLength: parseDimensionText(byName["Roll Length"]),
