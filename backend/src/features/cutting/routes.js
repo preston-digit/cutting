@@ -11,6 +11,7 @@ import {
   resolveScannedSerial,
   searchInventories,
   getInventoryById,
+  getInventoriesForItems,
   readInventoryCustomFields,
   splitSerializedInventory,
   writeInventoryDimensions,
@@ -111,13 +112,66 @@ router.get("/work-orders/:id", async (req, res, next) => {
       salesOrderNumber: wo.job?.salesOrder?.orderNumber || null,
       customerName: wo.job?.salesOrder?.customer?.name || null,
       shipByDate: wo.job?.salesOrder?.requestedDeliveryDate || null,
+      // quantityPerUnit is the BOM's per-finished-unit quantity; totalRequired
+      // scales that to the job's full target quantity — the operator's
+      // answer to "how much of this material do I need for this whole MO."
       bomComponents: (wo.job?.bom?.items?.nodes || []).map((n) => ({
         itemId: n.item.id,
         itemName: n.item.name,
         itemSku: n.item.sku,
-        quantity: n.quantity,
+        quantityPerUnit: n.quantity,
+        totalRequired: n.quantity != null && wo.job?.targetQuantity != null ? n.quantity * wo.job.targetQuantity : null,
       })),
     });
+  } catch (err) {
+    next(err);
+  }
+});
+
+// GET /api/cutting/work-orders/:id/available-material?cutWidth=&cutLength=
+// Every in-stock serialized label of this job's BOM component item(s), so
+// the operator can decide which piece to send the forklift for instead of
+// scanning blind. cutWidth/cutLength are optional — when the operator has
+// already entered them, sufficiency and waste can be computed exactly;
+// without them, pieces just sort remnant-first by ascending size.
+//
+// Sort priority (deliberately remnant-first — the business wants offcuts
+// consumed before a new roll is opened):
+//   1. pieces that can satisfy the requested cut, least waste first
+//   2. pieces that are known but too small for the requested cut
+//   3. pieces with unknown or out-of-sync dimensions, always last
+// Piece Type (Remnant vs Mill Roll) breaks ties within a tier.
+router.get("/work-orders/:id/available-material", async (req, res, next) => {
+  try {
+    const wo = await getWorkOrderDetail(req.params.id);
+    if (!wo) return res.status(404).json({ error: "Work order not found" });
+    const itemIds = (wo.job?.bom?.items?.nodes || []).map((n) => n.item.id);
+    const cutWidth = req.query.cutWidth ? Number(req.query.cutWidth) : null;
+    const cutLength = req.query.cutLength ? Number(req.query.cutLength) : null;
+    const hasTarget = cutWidth > 0 && cutLength > 0;
+
+    const nodes = await getInventoriesForItems(itemIds);
+    const pieces = nodes.map(withParsedDimensions).map((p) => {
+      const knownDims = p.rollWidth != null && p.rollLength != null && !p.areaMismatch?.outOfSync;
+      const area = knownDims ? p.rollWidth * p.rollLength : null;
+      const sufficient = knownDims && hasTarget ? p.rollWidth >= cutWidth && p.rollLength >= cutLength : knownDims;
+      const waste = sufficient && hasTarget ? area - cutWidth * cutLength : area;
+      let tier;
+      if (!knownDims) tier = 2;
+      else if (hasTarget && !sufficient) tier = 1;
+      else tier = 0;
+      return { ...p, knownDims, sufficient, waste, tier };
+    });
+
+    pieces.sort((a, b) => {
+      if (a.tier !== b.tier) return a.tier - b.tier;
+      if (a.waste !== b.waste) return (a.waste ?? Infinity) - (b.waste ?? Infinity);
+      const aRemnant = a.pieceType === "Remnant" ? 0 : 1;
+      const bRemnant = b.pieceType === "Remnant" ? 0 : 1;
+      return aRemnant - bRemnant;
+    });
+
+    res.json(pieces);
   } catch (err) {
     next(err);
   }
@@ -231,6 +285,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     remnantBinId,
     remnantBinName,
     operatorName,
+    notes,
   } = req.body || {};
 
   if (!sourceInventoryId || !cutWidth || !cutLength) {
@@ -380,8 +435,8 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
            source_width_after, source_length_after,
            working_piece_inventory_id, working_piece_scancode,
            remnant_inventory_id, remnant_scancode,
-           status, failed_step, steps
-         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27)
+           status, failed_step, steps, notes
+         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27, $28)
          RETURNING id`,
         [
           operatorName || null, workOrderId, wo.workOrderNumber, jobId, wo.job?.documentNumber || wo.job?.jobNumber,
@@ -391,7 +446,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
           sourceWidthAfter, sourceLengthAfter,
           workingPiece?.id || null, workingPiece?.scanCodeSerialNumber || null,
           remnant?.id || null, remnant?.scanCodeSerialNumber || null,
-          status, failedStep, JSON.stringify(steps),
+          status, failedStep, JSON.stringify(steps), notes || null,
         ]
       );
       cutEventId = rows[0].id;

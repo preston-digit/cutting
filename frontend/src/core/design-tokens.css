@@ -259,6 +259,16 @@ body {
   border: 1px solid var(--color-border);
 }
 .btn--danger { background: transparent; color: var(--color-negative); border: 1px solid var(--color-negative); }
+/* Large and unmistakable — the operator's hands are usually busy holding
+   the roll, so this is the one button on screen that should be impossible
+   to miss (by eye or by Enter-key focus ring). */
+.btn--commit {
+  width: 100%;
+  justify-content: center;
+  padding: var(--space-4) var(--space-5);
+  font-size: var(--fs-lg);
+  font-weight: 700;
+}
 
 /* --- Inputs --------------------------------------------------------------- */
 .input, .select {

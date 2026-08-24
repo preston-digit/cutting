@@ -42,6 +42,7 @@ export default function History({ nav }) {
             <div className="col">Working piece</div>
             <div className="col">Remnant</div>
             <div className="col">Status</div>
+            <div className="col">Notes</div>
           </div>
           {events.length === 0 && (
             <div className="row" style={{ cursor: "default" }}>
@@ -74,6 +75,7 @@ export default function History({ nav }) {
                 <StatusPill status={e.status} />
                 {e.failed_step && <div className="muted">failed at {e.failed_step}</div>}
               </div>
+              <div className="col">{e.notes || <span className="muted">—</span>}</div>
             </div>
           ))}
         </div>

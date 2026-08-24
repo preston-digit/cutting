@@ -407,6 +407,44 @@ export async function resolveScannedSerial(serialNumber) {
   return result;
 }
 
+// Live-confirmed via schema introspection: Query.inventories takes an
+// itemIds filter (in addition to search/trackingMethod/connection), so the
+// "available material" list can go straight to Digit for exactly the BOM
+// component item(s) rather than paging through everything and filtering
+// client-side.
+const INVENTORIES_BY_ITEM_QUERY = `
+  query ($itemIds: [ID!], $first: Int!) {
+    inventories(
+      itemIds: $itemIds
+      trackingMethod: [serialized]
+      minQuantityInStock: 0.01
+      connection: { first: $first }
+    ) {
+      nodes {
+        id
+        quantityInStock
+        scanCodeSerialNumber
+        scanCodeNumber
+        item { id name }
+        warehouseLocation { id locationCode }
+        customFields { fieldName fieldValueText fieldValueOption { value } }
+      }
+    }
+  }
+`;
+
+const AVAILABLE_MATERIAL_PAGE_SIZE = 200;
+
+/** Every in-stock serialized label of the given BOM component item(s) — see routes.js's /available-material. */
+export async function getInventoriesForItems(itemIds) {
+  if (!itemIds.length) return [];
+  const data = await digitRequest(INVENTORIES_BY_ITEM_QUERY, {
+    itemIds,
+    first: AVAILABLE_MATERIAL_PAGE_SIZE,
+  });
+  return data.inventories.nodes;
+}
+
 const SEARCH_INVENTORIES_QUERY = `
   query ($search: String, $first: Int!) {
     inventories(

@@ -32,6 +32,14 @@ export const completeWorkOrder = (workOrderId, completedQuantity) =>
 
 export const getHistory = (limit = 50) => apiRequest(`/api/cutting/history?limit=${limit}`);
 
+export const getAvailableMaterial = (workOrderId, cutWidth, cutLength) => {
+  const params = new URLSearchParams();
+  if (cutWidth) params.set("cutWidth", cutWidth);
+  if (cutLength) params.set("cutLength", cutLength);
+  const qs = params.toString();
+  return apiRequest(`/api/cutting/work-orders/${workOrderId}/available-material${qs ? `?${qs}` : ""}`);
+};
+
 /**
  * Streams the commit checklist as it executes. Calls onEvent(line) for each
  * NDJSON line the backend writes (one per step, plus a final "summary"

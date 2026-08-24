@@ -7,6 +7,7 @@ import {
   getDefaultBin,
   completeWorkOrder,
   commitCut,
+  getAvailableMaterial,
 } from "./api.js";
 import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
 
@@ -72,6 +73,8 @@ export default function CutScreen({ nav, workOrderId }) {
   const [areaMismatchAck, setAreaMismatchAck] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const scanInputRef = useRef(null);
+  const cutLengthInputRef = useRef(null);
+  const commitButtonRef = useRef(null);
 
   // --- Cut entry state -------------------------------------------------------
   const [cutWidth, setCutWidth] = useState("");
@@ -79,6 +82,11 @@ export default function CutScreen({ nav, workOrderId }) {
   const [remnantBin, setRemnantBin] = useState(null); // { id, name }
   const [binSearchResults, setBinSearchResults] = useState([]);
   const [binsError, setBinsError] = useState(null);
+  const [cutNotes, setCutNotes] = useState("");
+
+  // --- Available material (BOM component stock, sorted remnant-first) ------
+  const [availableMaterial, setAvailableMaterial] = useState(null);
+  const [availableMaterialError, setAvailableMaterialError] = useState(null);
 
   // --- Commit state -----------------------------------------------------------
   const [committing, setCommitting] = useState(false);
@@ -130,6 +138,25 @@ export default function CutScreen({ nav, workOrderId }) {
     scanInputRef.current?.focus();
   }, []);
 
+  // Refetches whenever the work order reloads (incl. after each commit,
+  // since a commit consumes stock) or the operator's entered cut dimensions
+  // change (debounced — sufficiency/waste sort only sharpens once dimensions
+  // are known, but the list is useful even before that).
+  useEffect(() => {
+    let cancelled = false;
+    const w = Number(cutWidth);
+    const l = Number(cutLength);
+    const timer = setTimeout(() => {
+      getAvailableMaterial(workOrderId, w > 0 ? w : undefined, l > 0 ? l : undefined)
+        .then((list) => !cancelled && setAvailableMaterial(list))
+        .catch((err) => !cancelled && setAvailableMaterialError(err.message));
+    }, 300);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [workOrderId, wo, cutWidth, cutLength]);
+
   // Shared by the typed/USB-wedge path (form submit) and the camera path.
   // A camera decode, or any typed value shaped like a Digit scancode, must
   // resolve by EXACT scancode match only — never fall through to a fuzzy
@@ -167,6 +194,16 @@ export default function CutScreen({ nav, workOrderId }) {
     } finally {
       setScanning(false);
     }
+  }
+
+  // Operator's hands are usually busy holding the roll — a full cut should
+  // be doable via Enter alone: width → length → commit button.
+  function focusOnEnter(nextRef) {
+    return (e) => {
+      if (e.key !== "Enter") return;
+      e.preventDefault();
+      nextRef.current?.focus();
+    };
   }
 
   function handleScanSubmit(e) {
@@ -238,6 +275,7 @@ export default function CutScreen({ nav, workOrderId }) {
     setCommitError(null);
     setScanInput("");
     setScanError(null);
+    setCutNotes("");
     scanInputRef.current?.focus();
   }
 
@@ -262,6 +300,7 @@ export default function CutScreen({ nav, workOrderId }) {
           cutLength: cut.cutLength,
           remnantBinId: cut.hasSideRemnant ? remnantBin?.id : undefined,
           operatorName,
+          notes: cutNotes.trim() || undefined,
         },
         (event) => {
           if (event.key === "summary") {
@@ -361,10 +400,10 @@ export default function CutScreen({ nav, workOrderId }) {
       <div className="two-col">
         <div className="card">
           <div className="section-label">Job details</div>
-          <div className="kv-list" style={{ paddingBottom: "var(--space-4)", marginBottom: "var(--space-4)", borderBottom: "1px solid var(--color-border)" }}>
+          <div className="kv-list" style={{ marginBottom: "var(--space-4)" }}>
             <div className="kv-row">
               <span className="kv-label">Work order</span>
-              <span className="kv-value">WO{wo.workOrderNumber}</span>
+              <span className="kv-value">WO{wo.workOrderNumber} <StatusPill status={wo.status} /></span>
             </div>
             <div className="kv-row">
               <span className="kv-label">Manufacturing order</span>
@@ -378,6 +417,29 @@ export default function CutScreen({ nav, workOrderId }) {
               <span className="kv-label">Target quantity</span>
               <span className="kv-value mono">{wo.targetQuantity} ea</span>
             </div>
+          </div>
+
+          {wo.bomComponents?.length > 0 && (
+            <div style={{ marginBottom: "var(--space-4)" }}>
+              <div className="section-label" style={{ marginBottom: "var(--space-2)" }}>Materials required</div>
+              <div className="card" style={{ padding: 0 }}>
+                <div className="table-head-row">
+                  <div className="col">Item</div>
+                  <div className="col">Qty per unit</div>
+                  <div className="col">Total required</div>
+                </div>
+                {wo.bomComponents.map((c) => (
+                  <div key={c.itemId} className="row" style={{ cursor: "default" }}>
+                    <div className="col">{c.itemName} <span className="muted">({c.itemSku})</span></div>
+                    <div className="col mono">{c.quantityPerUnit ?? "—"}</div>
+                    <div className="col mono">{c.totalRequired ?? "—"}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+
+          <div className="kv-list" style={{ marginBottom: "var(--space-4)" }}>
             {wo.salesOrderNumber && (
               <div className="kv-row">
                 <span className="kv-label">Sales order</span>
@@ -393,13 +455,53 @@ export default function CutScreen({ nav, workOrderId }) {
                 <span className="kv-value">{new Date(wo.shipByDate).toLocaleDateString()}</span>
               </div>
             )}
-            {wo.moNotes && (
-              <div className="kv-row">
-                <span className="kv-label">MO notes</span>
-                <span className="kv-value">{wo.moNotes}</span>
-              </div>
-            )}
           </div>
+
+          {wo.moNotes && (
+            <div className="warning-box" style={{ marginBottom: "var(--space-4)" }}>
+              <strong>MO notes:</strong> {wo.moNotes}
+            </div>
+          )}
+
+          {!committed && availableMaterial && availableMaterial.length > 0 && (
+            <div style={{ marginBottom: "var(--space-4)" }}>
+              <div className="section-label" style={{ marginBottom: "var(--space-2)" }}>
+                Available material
+                <span className="muted" style={{ fontWeight: 400 }}> — click a row to select it, or scan a roll directly</span>
+              </div>
+              <div className="card" style={{ padding: 0 }}>
+                <div className="table-head-row">
+                  <div className="col">Label</div>
+                  <div className="col">Type</div>
+                  <div className="col">Dimensions</div>
+                  <div className="col">Owner</div>
+                  <div className="col">Bin</div>
+                </div>
+                {availableMaterial.map((p) => (
+                  <div key={p.id} className="row" onClick={() => applySource(p)}>
+                    <div className="col">
+                      Label #{p.labelNumber} <span className="muted mono">({p.quantityInStock} ft²)</span>
+                    </div>
+                    <div className="col">
+                      <span className={`pill ${p.pieceType === "Remnant" ? "pill--purple" : "pill--neutral"}`}>
+                        {p.pieceType === "Remnant" ? "Remnant" : p.pieceType || "Mill Roll"}
+                      </span>
+                    </div>
+                    <div className="col mono">
+                      {p.knownDims ? `${p.rollWidth} × ${p.rollLength} ft` : <span className="negative">unknown/out of sync</span>}
+                    </div>
+                    <div className="col">{p.owner ?? "—"}</div>
+                    <div className="col">{p.binName}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+          {!committed && availableMaterialError && (
+            <div className="checklist-error-box" style={{ marginBottom: "var(--space-4)" }}>
+              Could not load available material: {availableMaterialError}
+            </div>
+          )}
 
           <div className="field">
             <label className="field-label">Operator</label>
@@ -529,11 +631,29 @@ export default function CutScreen({ nav, workOrderId }) {
                   <div style={{ display: "flex", gap: "var(--space-3)", marginBottom: "var(--space-3)" }}>
                     <div className="field" style={{ flex: 1 }}>
                       <label className="field-label">Cut Width (ft)</label>
-                      <input className="input" type="number" min="0" step="0.1" value={cutWidth} onChange={(e) => setCutWidth(e.target.value)} />
+                      <input
+                        className="input"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={cutWidth}
+                        onChange={(e) => setCutWidth(e.target.value)}
+                        onKeyDown={focusOnEnter(cutLengthInputRef)}
+                        autoFocus
+                      />
                     </div>
                     <div className="field" style={{ flex: 1 }}>
                       <label className="field-label">Cut Length (ft)</label>
-                      <input className="input" type="number" min="0" step="0.1" value={cutLength} onChange={(e) => setCutLength(e.target.value)} />
+                      <input
+                        ref={cutLengthInputRef}
+                        className="input"
+                        type="number"
+                        min="0"
+                        step="0.1"
+                        value={cutLength}
+                        onChange={(e) => setCutLength(e.target.value)}
+                        onKeyDown={focusOnEnter(commitButtonRef)}
+                      />
                     </div>
                   </div>
 
@@ -585,8 +705,21 @@ export default function CutScreen({ nav, workOrderId }) {
                       {cut.hasSideRemnant && !remnantBin && (
                         <div className="warning-box" style={{ marginBottom: "var(--space-2)" }}>Select a remnant bin</div>
                       )}
+
+                      <div className="field">
+                        <label className="field-label">Notes (optional) — a flaw, a mis-measure, an override reason</label>
+                        <textarea
+                          className="input"
+                          rows={2}
+                          value={cutNotes}
+                          onChange={(e) => setCutNotes(e.target.value)}
+                          placeholder="Anything unusual about this cut…"
+                        />
+                      </div>
+
                       <button
-                        className="btn btn--primary"
+                        ref={commitButtonRef}
+                        className="btn btn--primary btn--commit"
                         disabled={committing || (cut.hasSideRemnant && !remnantBin)}
                         onClick={handleCommit}
                         style={{ marginTop: "var(--space-3)" }}
@@ -686,24 +819,6 @@ export default function CutScreen({ nav, workOrderId }) {
               <span className="kv-label">Work center</span>
               <span className="kv-value">{wo.binName}</span>
             </div>
-            {wo.salesOrderNumber && (
-              <div className="kv-row">
-                <span className="kv-label">Sales order</span>
-                <span className="kv-value">{wo.salesOrderNumber}{wo.customerName ? ` — ${wo.customerName}` : ""}</span>
-              </div>
-            )}
-            {wo.shipByDate && (
-              <div className="kv-row">
-                <span className="kv-label">Ship by</span>
-                <span className="kv-value">{new Date(wo.shipByDate).toLocaleDateString()}</span>
-              </div>
-            )}
-            {wo.moNotes && (
-              <div className="kv-row">
-                <span className="kv-label">MO notes</span>
-                <span className="kv-value">{wo.moNotes}</span>
-              </div>
-            )}
           </div>
         </div>
       </div>
