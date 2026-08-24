@@ -90,6 +90,40 @@ function stripFieldNamePrefix(fieldName, value) {
   return value.trim();
 }
 
+// The org intends to move roll goods from ft² to yd² eventually — nothing in
+// this module may hardcode a unit string. Every quantity's unit comes from
+// Item.defaultStockUom (symbol/name/type), fetched alongside the item on
+// every query that returns one. `type: "area"` confirms the quantity is an
+// area measurement (live-confirmed: roll items report
+// { symbol: "ft²", name: "Square Feet", type: "area" }); a linear unit
+// ("ft", "yd") is derived from the area symbol for Roll Length/Width display
+// since Digit has no separate linear-UoM field for these custom fields.
+export function itemUom(item) {
+  const uom = item?.defaultStockUom;
+  if (!uom) return null;
+  return { symbol: uom.symbol, name: uom.name, type: uom.type };
+}
+
+/** "ft²" -> "ft", "sq yd" -> "yd" — best-effort, falls back to the area symbol unchanged. */
+export function deriveLinearUnitSymbol(areaSymbol) {
+  if (!areaSymbol) return null;
+  if (areaSymbol.endsWith("²")) return areaSymbol.slice(0, -1);
+  const sq = areaSymbol.match(/^sq\.?\s*(.+)$/i);
+  if (sq) return sq[1];
+  return areaSymbol;
+}
+
+// WarehouseLocationType enum (live-confirmed): bin, transit, workCenter,
+// unassigned, userDefined (deprecated alias of bin). Only bin/userDefined
+// are real, pickable storage — "transit" is Digit's system-generated
+// in-flight-transfer location and "unassigned"/"workCenter" are likewise
+// not places material can be picked from. Confirmed via schema, not by
+// string-matching a location's name/code.
+const REAL_STORAGE_BIN_TYPES = new Set(["bin", "userDefined"]);
+export function isRealStorageBin(locationType) {
+  return REAL_STORAGE_BIN_TYPES.has(locationType);
+}
+
 export function readInventoryCustomFields(inventory) {
   const byName = {};
   for (const f of inventory.customFields || []) {
@@ -270,7 +304,7 @@ const WORK_ORDERS_QUERY = `
           documentNumber
           targetQuantity
           notes
-          item { id name sku }
+          item { id name sku defaultStockUom { symbol name type } }
           salesOrder {
             id
             orderNumber
@@ -300,6 +334,7 @@ export async function getCuttingQueue() {
     moNumber: wo.job?.documentNumber || wo.job?.jobNumber,
     itemName: wo.job?.item?.name,
     itemSku: wo.job?.item?.sku,
+    itemUom: itemUom(wo.job?.item),
     targetQuantity: wo.job?.targetQuantity,
     salesOrderNumber: wo.job?.salesOrder?.orderNumber || null,
     customerName: wo.job?.salesOrder?.customer?.name || null,
@@ -332,12 +367,12 @@ const WORK_ORDER_DETAIL_QUERY = `
         notes
         createdOn
         createdBy { id profile { fullName } }
-        item { id name sku }
+        item { id name sku defaultStockUom { symbol name type } }
         manufacturingLocationAddress { id title }
         bom {
           id
           items(connection: { first: 50 }) {
-            nodes { id quantity item { id name sku } }
+            nodes { id quantity item { id name sku defaultStockUom { symbol name type } } }
           }
         }
         salesOrder {
@@ -367,8 +402,8 @@ const FETCH_BY_SERIAL_NUMBER_QUERY = `
           quantityInStock
           scanCodeSerialNumber
           scanCodeNumber
-          item { id name }
-          warehouseLocation { id locationCode }
+          item { id name defaultStockUom { symbol name type } }
+          warehouseLocation { id locationCode type }
           customFields { fieldName fieldValueText fieldValueOption { value } }
         }
       }
@@ -425,8 +460,8 @@ const INVENTORIES_BY_ITEM_QUERY = `
         quantityInStock
         scanCodeSerialNumber
         scanCodeNumber
-        item { id name }
-        warehouseLocation { id locationCode }
+        item { id name defaultStockUom { symbol name type } }
+        warehouseLocation { id locationCode type }
         customFields { fieldName fieldValueText fieldValueOption { value } }
       }
     }
@@ -457,8 +492,8 @@ const SEARCH_INVENTORIES_QUERY = `
         quantityInStock
         scanCodeSerialNumber
         scanCodeNumber
-        item { id name }
-        warehouseLocation { id locationCode }
+        item { id name defaultStockUom { symbol name type } }
+        warehouseLocation { id locationCode type }
         customFields { fieldName fieldValueText fieldValueOption { value } }
       }
     }
@@ -524,8 +559,8 @@ const INVENTORY_BY_ID_QUERY = `
       quantityInStock
       scanCodeSerialNumber
       scanCodeNumber
-      item { id name }
-      warehouseLocation { id locationCode }
+      item { id name defaultStockUom { symbol name type } }
+      warehouseLocation { id locationCode type }
       customFields { fieldName fieldValueText fieldValueOption { value } }
     }
   }

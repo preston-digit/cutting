@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getHistory } from "./api.js";
+import { formatArea, formatDims } from "./units.js";
 
 function StatusPill({ status }) {
   if (status === "completed") return <span className="pill pill--green">Completed</span>;
@@ -60,13 +61,13 @@ export default function History({ nav }) {
               <div className="col">
                 {e.source_scancode}
                 <div className="muted mono">
-                  {e.source_width_before} × {e.source_length_before} ft → {e.source_width_after} × {e.source_length_after} ft
+                  {formatDims(e.source_width_before, e.source_length_before, e.area_uom_symbol)} → {formatDims(e.source_width_after, e.source_length_after, e.area_uom_symbol)}
                 </div>
               </div>
               <div className="col mono">
-                {e.cut_width} × {e.cut_length} ft ({e.cut_area} ft²)
+                {formatDims(e.cut_width, e.cut_length, e.area_uom_symbol)} ({formatArea(e.cut_area, e.area_uom_symbol)})
                 {e.has_side_remnant && (
-                  <div className="muted">remnant {e.remnant_width} × {e.remnant_length} ft ({e.remnant_area} ft²)</div>
+                  <div className="muted">remnant {formatDims(e.remnant_width, e.remnant_length, e.area_uom_symbol)} ({formatArea(e.remnant_area, e.area_uom_symbol)})</div>
                 )}
               </div>
               <div className="col">{e.working_piece_scancode || <span className="muted">—</span>}</div>

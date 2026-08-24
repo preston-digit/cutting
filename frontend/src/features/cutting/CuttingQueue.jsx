@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { getQueue } from "./api.js";
+import { formatQty } from "./units.js";
 
 const POLL_INTERVAL_MS = 30_000;
 
@@ -82,7 +83,7 @@ export default function CuttingQueue({ nav }) {
               <div className="col">WO{r.workOrderNumber}</div>
               <div className="col">{r.moNumber}</div>
               <div className="col">{r.itemName}</div>
-              <div className="col mono">{r.targetQuantity} ea</div>
+              <div className="col mono">{formatQty(r.targetQuantity, r.itemUom?.symbol)}</div>
               <div className="col">{r.salesOrderNumber || <span className="muted">—</span>}</div>
               <div className="col">{formatShipBy(r.shipByDate)}</div>
               <div className="col">

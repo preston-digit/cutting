@@ -23,6 +23,9 @@ import {
   resolvePickableBinForAddress,
   sanitizeScanValue,
   looksLikeScancode,
+  itemUom,
+  deriveLinearUnitSymbol,
+  isRealStorageBin,
 } from "./digitOps.js";
 
 const router = Router();
@@ -45,6 +48,7 @@ function withParsedDimensions(inventory) {
       pctOff,
     };
   }
+  const uom = itemUom(inventory.item);
   return {
     id: inventory.id,
     scancode: inventory.scanCodeSerialNumber,
@@ -52,8 +56,11 @@ function withParsedDimensions(inventory) {
     quantityInStock: area,
     itemId: inventory.item?.id,
     itemName: inventory.item?.name,
+    areaUom: uom,
+    lengthUnitSymbol: uom ? deriveLinearUnitSymbol(uom.symbol) : null,
     binId: inventory.warehouseLocation?.id,
     binName: inventory.warehouseLocation?.locationCode,
+    binType: inventory.warehouseLocation?.type,
     rollLength: dims.rollLength,
     rollWidth: dims.rollWidth,
     owner: dims.owner,
@@ -105,6 +112,7 @@ router.get("/work-orders/:id", async (req, res, next) => {
       itemId: wo.job?.item?.id,
       itemName: wo.job?.item?.name,
       itemSku: wo.job?.item?.sku,
+      itemUom: itemUom(wo.job?.item),
       targetQuantity: wo.job?.targetQuantity,
       moNotes: wo.job?.notes || null,
       createdBy: wo.job?.createdBy?.profile?.fullName || null,
@@ -119,6 +127,7 @@ router.get("/work-orders/:id", async (req, res, next) => {
         itemId: n.item.id,
         itemName: n.item.name,
         itemSku: n.item.sku,
+        uom: itemUom(n.item),
         quantityPerUnit: n.quantity,
         totalRequired: n.quantity != null && wo.job?.targetQuantity != null ? n.quantity * wo.job.targetQuantity : null,
       })),
@@ -334,6 +343,12 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     const sourceScancode = source.scanCodeSerialNumber;
     const sourceWidth = sourceDims.rollWidth;
     const sourceLength = sourceDims.rollLength;
+    // Captured once here and carried through every "ft²"-shaped message
+    // below and onto the cut_events row — never hardcode a unit string, this
+    // org's roll items report it live (today "ft²"; the org intends to move
+    // to "yd²" eventually and this must follow without a code change).
+    const sourceAreaUom = itemUom(source.item);
+    const areaUnitLabel = sourceAreaUom?.symbol ? ` ${sourceAreaUom.symbol}` : "";
     // pickJobItem requires the working piece's bin to share the job's
     // manufacturingLocationAddress — not to literally sit in the work-center
     // location shown on the work order (workCenter-type locations can't hold
@@ -366,7 +381,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     let workingPiece = null;
     let remnant = null;
 
-    await runStep("splitWorkingPiece", `Split working piece (${cutArea} ft²) from label ${source.scanCodeNumber}`, async () => {
+    await runStep("splitWorkingPiece", `Split working piece (${cutArea}${areaUnitLabel}) from label ${source.scanCodeNumber}`, async () => {
       const result = await splitSerializedInventory(sourceInventoryId, cutArea, workingPieceBinId);
       workingPiece = result.newInventory;
       return { detail: `Created label #${workingPiece.scanCodeNumber} (${workingPiece.scanCodeSerialNumber})`, digit: result };
@@ -385,7 +400,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
 
     if (hasSideRemnant) {
       let resolvedRemnantBinId = remnantBinId;
-      await runStep("splitRemnant", `Split side remnant (${remnantArea.toFixed(2)} ft²)`, async () => {
+      await runStep("splitRemnant", `Split side remnant (${remnantArea.toFixed(2)}${areaUnitLabel})`, async () => {
         if (!resolvedRemnantBinId && remnantBinName) {
           const bin = await resolveWarehouseLocationByName(remnantBinName);
           resolvedRemnantBinId = bin.id;
@@ -420,7 +435,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
       if (!workingPiece) throw new Error("Working piece was not created — cannot pick");
       if (!jobId) throw new Error("Work order has no linked job to pick into");
       const digit = await pickJobItem(jobId, workingPiece.id, cutArea);
-      return { detail: `Picked ${cutArea} ft² into job ${jobId}`, digit };
+      return { detail: `Picked ${cutArea}${areaUnitLabel} into job ${jobId}`, digit };
     });
 
     await runStep("startWorkOrder", "Start work order", async () => {
@@ -445,8 +460,8 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
            source_width_after, source_length_after,
            working_piece_inventory_id, working_piece_scancode,
            remnant_inventory_id, remnant_scancode,
-           status, failed_step, steps, notes
-         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27, $28)
+           status, failed_step, steps, notes, area_uom_symbol
+         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27, $28, $29)
          RETURNING id`,
         [
           operatorName || null, workOrderId, wo.workOrderNumber, jobId, wo.job?.documentNumber || wo.job?.jobNumber,
@@ -456,7 +471,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
           sourceWidthAfter, sourceLengthAfter,
           workingPiece?.id || null, workingPiece?.scanCodeSerialNumber || null,
           remnant?.id || null, remnant?.scanCodeSerialNumber || null,
-          status, failedStep, JSON.stringify(steps), notes || null,
+          status, failedStep, JSON.stringify(steps), notes || null, sourceAreaUom?.symbol || null,
         ]
       );
       cutEventId = rows[0].id;

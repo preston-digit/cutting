@@ -166,6 +166,7 @@ body {
 .pill--purple { background: var(--status-purple-bg-solid); color: var(--status-purple-fg); }
 .pill--neutral { background: var(--status-neutral-bg-solid); color: var(--status-neutral-fg); }
 .negative { color: var(--color-negative); }
+.warning-text { color: var(--color-warning-box-fg); }
 
 /* --- Page header: breadcrumb / title+pill / created-by / tabs ---------- */
 .breadcrumb {
@@ -280,6 +281,11 @@ body {
   color: var(--color-muted);
   white-space: nowrap;
 }
+/* Two-class selector beats .progress-bar-label's single-class color rule
+   regardless of source order — needed because .warning-text/.negative are
+   defined earlier in this file than .progress-bar-label. */
+.progress-bar-label.warning-text { color: var(--color-warning-box-fg); }
+.progress-bar-label.negative { color: var(--color-negative); }
 
 .kv-list { display: flex; flex-direction: column; gap: var(--space-3); }
 .kv-row { display: flex; justify-content: space-between; gap: var(--space-3); font-size: var(--fs-base); }

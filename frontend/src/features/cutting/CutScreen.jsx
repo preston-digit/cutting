@@ -10,6 +10,7 @@ import {
   getAvailableMaterial,
 } from "./api.js";
 import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
+import { formatArea, formatLength, formatDims, formatQty, linearUnitSymbol } from "./units.js";
 
 const OPERATOR_STORAGE_KEY = "cutting.operatorName";
 // Mirrors backend/src/features/cutting/digitOps.js's looksLikeScancode/sanitizeScanValue —
@@ -339,14 +340,20 @@ export default function CutScreen({ nav, workOrderId }) {
 
   async function handleCompleteCut() {
     const cutCount = wo.cutCount || 0;
-    if (cutCount < wo.targetQuantity) {
+    // Never send more than the work order's own expected quantity — cutCount
+    // can legitimately exceed target (extra test cuts, a revised-down MO),
+    // but completedQuantity in Digit must never read as "more done than
+    // planned." At or above target, complete at exactly the target; only
+    // below target does the actual (short) count go through, with a warning.
+    const atOrAboveTarget = cutCount >= wo.targetQuantity;
+    if (!atOrAboveTarget) {
       const proceed = window.confirm(
         `Only ${cutCount} of ${wo.targetQuantity} pieces have been cut. Complete the work order early anyway?`
       );
       if (!proceed) return;
     }
     try {
-      await completeWorkOrder(workOrderId, cutCount);
+      await completeWorkOrder(workOrderId, atOrAboveTarget ? wo.targetQuantity : cutCount);
       const fresh = await getWorkOrder(workOrderId);
       setWo(fresh);
     } catch (err) {
@@ -357,7 +364,12 @@ export default function CutScreen({ nav, workOrderId }) {
   if (loadError) return <div className="checklist-error-box" style={{ margin: "var(--space-5)" }}>{loadError}</div>;
   if (!wo) return <div style={{ padding: "var(--space-5)" }} className="muted">Loading…</div>;
 
+  // cutCount is drawn from ALL cut_events history for this work order (see
+  // getCutCount in routes.js), not just cuts committed in this browser
+  // session — an operator who cuts two pieces, walks away, and comes back
+  // still sees "2 of N cut" rather than the counter resetting to zero.
   const cutCount = wo.cutCount || 0;
+  const overTarget = wo.targetQuantity != null && cutCount > wo.targetQuantity;
   const progressPct = wo.targetQuantity ? Math.min(100, (cutCount / wo.targetQuantity) * 100) : 0;
   const committed = commitSummary?.status === "completed";
 
@@ -373,7 +385,7 @@ export default function CutScreen({ nav, workOrderId }) {
       if (created) {
         const intendedL = splitStepKey === "splitWorkingPiece" ? cut?.cutLength : cut?.remnantLength;
         const intendedW = splitStepKey === "splitWorkingPiece" ? cut?.cutWidth : cut?.remnantWidth;
-        return `Label #${created.scanCodeNumber} (${created.scanCodeSerialNumber}) was created at ${created.quantityInStock} ft², but dimensions were NOT written — intended Roll Length=${intendedL}, Roll Width=${intendedW}. Needs manual repair in Digit.`;
+        return `Label #${created.scanCodeNumber} (${created.scanCodeSerialNumber}) was created at ${formatArea(created.quantityInStock, source?.areaUom?.symbol)}, but dimensions were NOT written — intended Roll Length=${intendedL}, Roll Width=${intendedW}. Needs manual repair in Digit.`;
       }
     }
     if (step.key === "writeSourceDimensions" && cut) {
@@ -420,7 +432,7 @@ export default function CutScreen({ nav, workOrderId }) {
             </div>
             <div className="kv-row">
               <span className="kv-label">Target quantity</span>
-              <span className="kv-value mono">{wo.targetQuantity} ea</span>
+              <span className="kv-value mono">{formatQty(wo.targetQuantity, wo.itemUom?.symbol)}</span>
             </div>
           </div>
 
@@ -430,14 +442,14 @@ export default function CutScreen({ nav, workOrderId }) {
               <div className="card" style={{ padding: 0 }}>
                 <div className="table-head-row">
                   <div className="col">Item</div>
-                  <div className="col">Qty per unit</div>
-                  <div className="col">Total required</div>
+                  <div className="col">Per rug</div>
+                  <div className="col">Total for {wo.targetQuantity} {wo.itemName}</div>
                 </div>
                 {wo.bomComponents.map((c) => (
                   <div key={c.itemId} className="row" style={{ cursor: "default" }}>
                     <div className="col">{c.itemName} <span className="muted">({c.itemSku})</span></div>
-                    <div className="col mono">{c.quantityPerUnit ?? "—"}</div>
-                    <div className="col mono">{c.totalRequired ?? "—"}</div>
+                    <div className="col mono">{formatQty(c.quantityPerUnit, c.uom?.symbol)}</div>
+                    <div className="col mono">{formatQty(c.totalRequired, c.uom?.symbol)}</div>
                   </div>
                 ))}
               </div>
@@ -485,7 +497,7 @@ export default function CutScreen({ nav, workOrderId }) {
                 {availableMaterial.map((p) => (
                   <div key={p.id} className="row" onClick={() => applySource(p)}>
                     <div className="col">
-                      Label #{p.labelNumber} <span className="muted mono">({p.quantityInStock} ft²)</span>
+                      Label #{p.labelNumber} <span className="muted mono">({formatArea(p.quantityInStock, p.areaUom?.symbol)})</span>
                     </div>
                     <div className="col">
                       <span className={`pill ${p.pieceType === "Remnant" ? "pill--purple" : "pill--neutral"}`}>
@@ -493,7 +505,7 @@ export default function CutScreen({ nav, workOrderId }) {
                       </span>
                     </div>
                     <div className="col mono">
-                      {p.knownDims ? `${p.rollWidth} × ${p.rollLength} ft` : <span className="negative">unknown/out of sync</span>}
+                      {p.knownDims ? formatDims(p.rollWidth, p.rollLength, p.areaUom?.symbol) : <span className="negative">unknown/out of sync</span>}
                     </div>
                     <div className="col">{p.owner ?? "—"}</div>
                     <div className="col">{p.binName}</div>
@@ -559,7 +571,7 @@ export default function CutScreen({ nav, workOrderId }) {
                   {searchResults.map((r) => (
                     <div key={r.id} className="row" onClick={() => applySource(r)}>
                       <div className="col">Label #{r.labelNumber} — {r.itemName}</div>
-                      <div className="col mono">{r.quantityInStock} ft²</div>
+                      <div className="col mono">{formatArea(r.quantityInStock, r.areaUom?.symbol)}</div>
                       <div className="col">{r.binName}</div>
                     </div>
                   ))}
@@ -585,15 +597,15 @@ export default function CutScreen({ nav, workOrderId }) {
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Quantity in stock</span>
-                      <span className="kv-value mono">{source.quantityInStock} ft²</span>
+                      <span className="kv-value mono">{formatArea(source.quantityInStock, source.areaUom?.symbol)}</span>
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Roll Length</span>
-                      <span className="kv-value mono">{source.rollLength ?? "—"} ft</span>
+                      <span className="kv-value mono">{formatLength(source.rollLength, source.areaUom?.symbol)}</span>
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Roll Width</span>
-                      <span className="kv-value mono">{source.rollWidth ?? "—"} ft</span>
+                      <span className="kv-value mono">{formatLength(source.rollWidth, source.areaUom?.symbol)}</span>
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Owner</span>
@@ -619,8 +631,8 @@ export default function CutScreen({ nav, workOrderId }) {
                   {source.areaMismatch?.outOfSync && (
                     <div className="warning-box" style={{ marginTop: "var(--space-3)" }}>
                       This label's dimensions are out of sync with its area — likely split outside this
-                      module. Quantity in stock is <span className="mono">{source.areaMismatch.quantityInStock} ft²</span>,
-                      but Roll Length × Roll Width implies <span className="mono">{source.areaMismatch.impliedArea} ft²</span>.
+                      module. Quantity in stock is <span className="mono">{formatArea(source.areaMismatch.quantityInStock, source.areaUom?.symbol)}</span>,
+                      but Roll Length × Roll Width implies <span className="mono">{formatArea(source.areaMismatch.impliedArea, source.areaUom?.symbol)}</span>.
                       <label style={{ display: "flex", gap: "var(--space-2)", marginTop: "var(--space-2)", alignItems: "center" }}>
                         <input type="checkbox" checked={areaMismatchAck} onChange={(e) => setAreaMismatchAck(e.target.checked)} />
                         I confirm the dimensions above and want to cut anyway
@@ -635,7 +647,7 @@ export default function CutScreen({ nav, workOrderId }) {
                   <h2 className="section-label">Cut entry</h2>
                   <div style={{ display: "flex", gap: "var(--space-3)", marginBottom: "var(--space-3)" }}>
                     <div className="field" style={{ flex: 1 }}>
-                      <label className="field-label">Cut Width (ft)</label>
+                      <label className="field-label">Cut Width{source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}</label>
                       <input
                         className="input"
                         type="number"
@@ -648,7 +660,7 @@ export default function CutScreen({ nav, workOrderId }) {
                       />
                     </div>
                     <div className="field" style={{ flex: 1 }}>
-                      <label className="field-label">Cut Length (ft)</label>
+                      <label className="field-label">Cut Length{source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}</label>
                       <input
                         ref={cutLengthInputRef}
                         className="input"
@@ -664,7 +676,7 @@ export default function CutScreen({ nav, workOrderId }) {
 
                   {cut && (cut.exceedsSource || cut.exceedsLength) && (
                     <div className="checklist-error-box" style={{ marginBottom: "var(--space-3)" }}>
-                      Cut dimensions exceed the source roll ({source.rollWidth} × {source.rollLength} ft).
+                      Cut dimensions exceed the source roll ({formatDims(source.rollWidth, source.rollLength, source.areaUom?.symbol)}).
                     </div>
                   )}
 
@@ -672,15 +684,15 @@ export default function CutScreen({ nav, workOrderId }) {
                     <div className="card" style={{ marginBottom: "var(--space-4)" }}>
                       <div className="section-label" style={{ marginBottom: "var(--space-2)" }}>Summary</div>
                       <div style={{ marginBottom: "var(--space-2)" }}>
-                        Consume <span className="mono">{cut.cutArea} ft²</span> from Label #{source.labelNumber}.
+                        Consume <span className="mono">{formatArea(cut.cutArea, source.areaUom?.symbol)}</span> from Label #{source.labelNumber}.
                       </div>
                       <div style={{ marginBottom: "var(--space-2)" }}>
-                        Create piece <span className="mono">{cut.cutWidth} × {cut.cutLength} ft</span> (<span className="mono">{cut.cutArea} ft²</span>).
+                        Create piece <span className="mono">{formatDims(cut.cutWidth, cut.cutLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.cutArea, source.areaUom?.symbol)}</span>).
                       </div>
                       {cut.hasSideRemnant ? (
                         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
                           <span>
-                            Create remnant <span className="mono">{cut.remnantWidth} × {cut.remnantLength} ft</span> (<span className="mono">{cut.remnantArea} ft²</span>) →
+                            Create remnant <span className="mono">{formatDims(cut.remnantWidth, cut.remnantLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.remnantArea, source.areaUom?.symbol)}</span>) →
                           </span>
                           <select
                             className="select"
@@ -699,7 +711,7 @@ export default function CutScreen({ nav, workOrderId }) {
                       ) : (
                         <div className="muted" style={{ marginBottom: "var(--space-2)" }}>
                           Full-width crosscut — no side remnant. Source label continues at{" "}
-                          <span className="mono">{cut.sourceWidthAfter} × {cut.sourceLengthAfter} ft</span>.
+                          <span className="mono">{formatDims(cut.sourceWidthAfter, cut.sourceLengthAfter, source.areaUom?.symbol)}</span>.
                         </div>
                       )}
                       {binsError && (
@@ -803,7 +815,11 @@ export default function CutScreen({ nav, workOrderId }) {
             <div className="progress-bar-track">
               <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
             </div>
-            <div className="progress-bar-label">{cutCount} of {wo.targetQuantity} cut</div>
+            {overTarget ? (
+              <div className="progress-bar-label warning-text">{cutCount} cut, target {wo.targetQuantity} — over target</div>
+            ) : (
+              <div className="progress-bar-label">{cutCount} of {wo.targetQuantity} cut</div>
+            )}
           </div>
 
           <button
@@ -812,7 +828,7 @@ export default function CutScreen({ nav, workOrderId }) {
             onClick={handleCompleteCut}
             disabled={wo.status === "COMPLETED" || cutCount === 0}
           >
-            {wo.status === "COMPLETED" ? "Work order completed" : `Complete ${cutCount} of ${wo.targetQuantity}`}
+            {wo.status === "COMPLETED" ? "Work order completed" : cutCount >= wo.targetQuantity ? "Complete" : `Complete ${cutCount} of ${wo.targetQuantity}`}
           </button>
 
           <div className="kv-list">
