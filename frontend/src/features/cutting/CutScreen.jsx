@@ -233,6 +233,11 @@ export default function CutScreen({ nav, workOrderId }) {
     source && (!bomMismatch || bomOverride) && (!source.areaMismatch?.outOfSync || areaMismatchAck);
 
   // --- Cut math (mirrors backend/src/features/cutting/routes.js) ------------
+  // ⚠️ Assumed physical cut order — see SCHEMA_NOTES.md and the matching
+  // comment in routes.js: the full-width piece at cutLength comes off the
+  // roll first, cutWidth is ripped from that piece second, so the side
+  // remnant is only cutLength long and the roll always loses the full
+  // cutLength regardless of cutWidth. Not yet confirmed with the customer.
   const cut = useMemo(() => {
     const w = Number(cutWidth);
     const l = Number(cutLength);

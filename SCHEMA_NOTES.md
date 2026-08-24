@@ -253,6 +253,39 @@ float rounding), which is also what `quantityInStock` on the three labels sums
 to after the two `splitSerializedInventory` calls, since that mutation moves
 quantity rather than recomputing it independently.
 
+### ⚠️ Assumed physical cut order — needs validation with the customer
+
+The math above encodes one specific assumption about how the operator
+physically cuts the roll, and it has never been confirmed against how the
+cutting table actually works: **the full-width piece at the requested
+`cutLength` comes off the parent roll first, and the requested `cutWidth` is
+then ripped out of *that* piece** — not the other way around (ripping the
+width down the full remaining length of the roll first, then crosscutting).
+Concretely, this module assumes:
+
+1. Crosscut the source roll at `cutLength` → a `sourceWidth × cutLength`
+   piece comes free of the roll.
+2. Rip that piece lengthwise at `cutWidth` → the `cutWidth × cutLength`
+   working piece, plus a `(sourceWidth − cutWidth) × cutLength` **side**
+   remnant (scrap the same length as the cut, narrower than the source).
+3. The parent roll is now `sourceWidth × (sourceLength − cutLength)` —
+   **unchanged width, shorter by the full `cutLength` regardless of
+   `cutWidth`.** Even a very narrow working piece still costs the roll its
+   entire crosscut length; there is no assumption that a narrow cut could be
+   ripped off the roll's existing width without shortening it.
+
+This is a real business-rule assumption, not just an implementation detail:
+if the shop actually rips the width down the roll's full remaining length
+first and crosscuts second, the remnant this module creates would have the
+wrong shape (a long, full-length offcut rather than a short, cut-length-only
+side remnant), even though the *areas* would still reconcile exactly (the
+math above is agnostic to cut order for area purposes — only the remnant's
+implied length/width split depends on it). **Flagged for explicit
+confirmation with the customer** — see also the mirrored comment in
+`backend/src/features/cutting/routes.js` (the authoritative implementation)
+and `frontend/src/features/cutting/CutScreen.jsx` (the live preview, which
+must keep matching it exactly).
+
 ## 4b. Live-discovered location constraints on split/pick (found building Step 4)
 
 Two business rules surfaced only by actually running the mutations against
@@ -331,6 +364,53 @@ trigger printing itself. The post-commit UI instead:
 - Displays a plain-language instruction: *"Find the label above in the list
   that just opened, then click Reprint label."* Labeled honestly as a manual
   step — the UI never implies the app printed anything.
+
+### Re-investigated 2026-08-24 — still a blocking gap, this time with the full schema in hand
+
+Re-ran the introspection specifically hunting for a print/label/document
+action on serialized inventory (a cutting table producing two new labels per
+cut is exactly the workflow this would matter most for). Pulled every field
+on every type in the live schema and filtered for `print`/`label`/`pdf`/
+`document`/`barcode`/`scancode` by name. Full result, for the record:
+
+- **Query-side**: `documentNumberPrefix(es)`, `generatePurchaseOrderPdf`,
+  `generateSalesOrderPdf`, `generateQuotePdf` — none touch inventory labels.
+- **Type-side**: every `CustomLabel*`/`LabelDetails` field is **configuration**
+  (`labelWidth`, `labelHeight`, `labelAlignment`, `showBarCode`, `layoutJson`,
+  etc.) — i.e. what a label template *looks like*, never an action that
+  *renders or emits* one for a specific inventory record. `Item.scanCodeSerialNumber`,
+  `Inventory.scanCodeNumber`/`scanCodeSerialNumber`/`scanCodeCategory` are
+  plain data fields, not print triggers.
+- **Mutation-side**: zero matches for `print`/`label`/`pdf` of any kind.
+
+This confirms (rather than merely repeats) the original finding: **there is
+no `printSerializedInventoryLabel` mutation, no label-PDF/image query, and no
+per-record deep link into Digit's own label UI, direct or indirect.** The gap
+is real and this module cannot close it from its side — the manual
+"scancode + open list + click Reprint" flow above stays as the working path.
+
+**Blocking gap — recommended exact wording to raise with Digit's engineering
+team:**
+
+> We're building a cutting-floor module (via the GraphQL API) that creates
+> two new serialized inventory labels per cut and needs to get them printed
+> immediately, at the workstation, without the operator leaving our app. We
+> introspected the full schema and found `CustomLabelConfigurationDetails` /
+> `LabelDetails` (label template configuration) and `generateSalesOrderPdf` /
+> `generatePurchaseOrderPdf` / `generateQuotePdf` (document PDFs unrelated to
+> inventory), but no equivalent for a **serialized inventory label** — no
+> `printSerializedInventoryLabel` mutation, no query that returns a rendered
+> label (PDF/image/HTML) for a given `inventoryId`, and no stable per-record
+> URL into the serialized-inventory list/drawer (it's always
+> `/operations/inventory/serialized` with the record selected client-side,
+> never `/operations/inventory/serialized/{id}` or similar).
+>
+> Could Digit expose either (a) a mutation/query that returns a
+> print-ready label document for a given `inventoryId` (respecting the org's
+> configured `CustomLabelConfigurationDetails` template), or (b) a stable
+> per-record deep link that opens directly to that record's drawer with
+> "Reprint label" one click away? Either would let integrations avoid a fully
+> manual "open the list, find the record, click Reprint" step per label.
 
 ## Barcode vs. Label # (live finding from a physical label)
 

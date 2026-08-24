@@ -345,6 +345,16 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     const workingPieceBin = await resolvePickableBinForAddress(manufacturingAddressId);
     const workingPieceBinId = workingPieceBin.id;
 
+    // ⚠️ ASSUMED PHYSICAL CUT ORDER — not yet confirmed with the customer,
+    // see SCHEMA_NOTES.md ("Assumed physical cut order"). This assumes the
+    // full-width piece at cutLength comes off the roll FIRST, and cutWidth is
+    // then ripped out of THAT piece — so the side remnant is only cutLength
+    // long (same length as the cut), and the parent roll always loses the
+    // full cutLength regardless of how narrow cutWidth is. If the shop
+    // actually rips the width down the roll's full remaining length first,
+    // this produces a remnant of the wrong shape even though the areas below
+    // still reconcile exactly. Keep this in sync with the mirrored cut math
+    // in frontend/src/features/cutting/CutScreen.jsx.
     const cutArea = Number(cutWidth) * Number(cutLength);
     const hasSideRemnant = sourceWidth != null && Number(cutWidth) < sourceWidth;
     const remnantWidth = hasSideRemnant ? sourceWidth - Number(cutWidth) : null;
