@@ -1,6 +1,13 @@
 /* Pinned design tokens — REUSABLE CORE. Mirror Digit's ERP shell so embedded
    modules look native. Do NOT re-style per screen; consume these tokens
-   everywhere. See DESIGN.md. */
+   everywhere. See DESIGN.md.
+
+   Every color is a variable, defined once under :root (dark — the original,
+   still-default look) and again under [data-theme="light"] (mirrors Digit's
+   light screens: white page, very light gray surfaces, dark text, same
+   status-pill hues re-tuned for contrast on a light background). The
+   attribute is set on <html> by core/Shell.jsx's theme toggle. Nothing
+   outside this file should hardcode a color — add a token here instead. */
 
 :root {
   /* Type */
@@ -11,7 +18,7 @@
   --fs-title: 24px;
   --fs-section: 15px;
 
-  /* Palette — dark theme, mirrors Digit's production screens */
+  /* Palette — dark theme (default), mirrors Digit's production screens */
   --color-bg: #0d0d0d;
   --color-surface: #161616;
   --color-surface-2: #1a1a1a;
@@ -23,7 +30,6 @@
   --color-negative: #ef5b5b;
 
   /* Status pill colors */
-  --status-green-bg: #16332433;
   --status-green-bg-solid: #1c3a2a;
   --status-green-fg: #5fd08a;
   --status-blue-bg-solid: #1b2b45;
@@ -32,6 +38,28 @@
   --status-purple-fg: #b191f2;
   --status-neutral-bg-solid: #262626;
   --status-neutral-fg: #b5b5b5;
+
+  /* Buttons */
+  --color-btn-primary-bg: #eef1f6;
+  --color-btn-primary-fg: #111111;
+
+  /* Checklist / message boxes */
+  --color-error-icon-bg: #3a1c1c;
+  --color-error-box-bg: #2a1414;
+  --color-error-box-border: #4a2020;
+  --color-error-box-fg: #f2b8b8;
+  --color-warning-box-bg: #3a2f14;
+  --color-warning-box-border: #5c4a1e;
+  --color-warning-box-fg: #f0d080;
+
+  /* Camera scanner modal — intentionally theme-invariant: it's a
+     full-screen camera viewfinder overlay, not page chrome, so it stays
+     dark in both themes (same values repeated in the light block below). */
+  --color-scanner-backdrop: rgba(0, 0, 0, 0.85);
+  --color-scanner-modal-bg: #000000;
+  --color-scanner-shadow: rgba(0, 0, 0, 0.35);
+  --color-scanner-status-bg: rgba(0, 0, 0, 0.65);
+  --color-scanner-status-fg: #ffffff;
 
   /* Layout */
   --row-height: 56px;
@@ -43,6 +71,49 @@
   --space-6: 32px;
   --radius-card: 10px;
   --radius-input: 6px;
+}
+
+[data-theme="light"] {
+  /* Palette — light theme, mirrors Digit's light screens */
+  --color-bg: #ffffff;
+  --color-surface: #ffffff;
+  --color-surface-2: #f2f3f5;
+  --color-fg: #16181d;
+  --color-muted: #6b7280;
+  --color-border: #e2e4e8;
+  --color-row-hover: #f5f6f8;
+  --color-accent: #2563eb;
+  --color-negative: #c8372f;
+
+  /* Status pill colors — same hues, tuned for contrast on a light bg */
+  --status-green-bg-solid: #dcf5e6;
+  --status-green-fg: #1a7a43;
+  --status-blue-bg-solid: #dbe8ff;
+  --status-blue-fg: #1c50b0;
+  --status-purple-bg-solid: #ece3fb;
+  --status-purple-fg: #6b3fc7;
+  --status-neutral-bg-solid: #eceef1;
+  --status-neutral-fg: #52545b;
+
+  /* Buttons — primary action inverts the page in both themes */
+  --color-btn-primary-bg: #16181d;
+  --color-btn-primary-fg: #ffffff;
+
+  /* Checklist / message boxes */
+  --color-error-icon-bg: #fbdada;
+  --color-error-box-bg: #fdeaea;
+  --color-error-box-border: #f3c6c6;
+  --color-error-box-fg: #a23131;
+  --color-warning-box-bg: #fdf3d9;
+  --color-warning-box-border: #f0dba0;
+  --color-warning-box-fg: #8a6414;
+
+  /* Camera scanner modal — see :root note above; unchanged on purpose. */
+  --color-scanner-backdrop: rgba(0, 0, 0, 0.85);
+  --color-scanner-modal-bg: #000000;
+  --color-scanner-shadow: rgba(0, 0, 0, 0.35);
+  --color-scanner-status-bg: rgba(0, 0, 0, 0.65);
+  --color-scanner-status-fg: #ffffff;
 }
 
 /* No outer chrome — the host ERP shell provides the frame. */
@@ -59,6 +130,26 @@ body {
 .link { color: var(--color-accent); cursor: pointer; text-decoration: none; }
 .link:hover { text-decoration: underline; }
 .mono { font-family: "SF Mono", "Roboto Mono", ui-monospace, monospace; }
+
+/* --- Theme toggle -------------------------------------------------------- */
+.theme-toggle {
+  position: fixed;
+  top: var(--space-3);
+  right: var(--space-3);
+  z-index: 900;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border-radius: 999px;
+  background: var(--color-surface-2);
+  border: 1px solid var(--color-border);
+  color: var(--color-fg);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: pointer;
+  font-size: var(--fs-lg);
+}
 
 /* --- Status pills: rounded-full, solid muted backgrounds -------------- */
 .pill {
@@ -252,7 +343,7 @@ body {
   cursor: pointer;
 }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.btn--primary { background: #eef1f6; color: #111; }
+.btn--primary { background: var(--color-btn-primary-bg); color: var(--color-btn-primary-fg); }
 .btn--secondary {
   background: transparent;
   color: var(--color-fg);
@@ -297,16 +388,16 @@ body {
 .checklist-icon--pending { background: var(--color-surface-2); color: var(--color-muted); }
 .checklist-icon--running { background: var(--status-blue-bg-solid); color: var(--status-blue-fg); }
 .checklist-icon--ok { background: var(--status-green-bg-solid); color: var(--status-green-fg); }
-.checklist-icon--error { background: #3a1c1c; color: var(--color-negative); }
+.checklist-icon--error { background: var(--color-error-icon-bg); color: var(--color-negative); }
 .checklist-icon--skipped { background: var(--color-surface-2); color: var(--color-muted); }
 .checklist-detail { color: var(--color-muted); font-size: var(--fs-sm); margin-top: 2px; }
 .checklist-error-box {
   margin-top: var(--space-3);
   padding: var(--space-3);
-  background: #2a1414;
-  border: 1px solid #4a2020;
+  background: var(--color-error-box-bg);
+  border: 1px solid var(--color-error-box-border);
   border-radius: var(--radius-input);
-  color: #f2b8b8;
+  color: var(--color-error-box-fg);
   font-size: var(--fs-sm);
 }
 
@@ -314,7 +405,7 @@ body {
 .scanner-modal-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.85);
+  background: var(--color-scanner-backdrop);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -323,7 +414,7 @@ body {
 .scanner-modal {
   position: relative;
   width: min(480px, 92vw);
-  background: #000;
+  background: var(--color-scanner-modal-bg);
   border-radius: var(--radius-card);
   overflow: hidden;
   line-height: 0;
@@ -343,7 +434,7 @@ body {
   height: 32%;
   border: 2px solid var(--color-negative);
   border-radius: 8px;
-  box-shadow: 0 0 0 9999px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 0 0 9999px var(--color-scanner-shadow);
   pointer-events: none;
   transition: border-color 0.15s ease;
 }
@@ -354,8 +445,8 @@ body {
   left: 0;
   right: 0;
   padding: var(--space-3);
-  background: rgba(0, 0, 0, 0.65);
-  color: #fff;
+  background: var(--color-scanner-status-bg);
+  color: var(--color-scanner-status-fg);
   text-align: center;
   font-size: var(--fs-sm);
   line-height: 1.4;
@@ -368,10 +459,10 @@ body {
 
 .warning-box {
   padding: var(--space-3);
-  background: #3a2f14;
-  border: 1px solid #5c4a1e;
+  background: var(--color-warning-box-bg);
+  border: 1px solid var(--color-warning-box-border);
   border-radius: var(--radius-input);
-  color: #f0d080;
+  color: var(--color-warning-box-fg);
   font-size: var(--fs-base);
   margin-bottom: var(--space-3);
 }
