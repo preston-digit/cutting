@@ -238,3 +238,45 @@ exits non-zero on any failure (suitable for CI). **It performs a real cut
 against real Digit data** — point it at dummy/test records, not production
 inventory, since it actually splits the source label and picks the working
 piece into the given MO.
+
+## Resetting demo data
+
+Repeated smoke-test runs and manual testing accumulate test artifacts in a
+demo org — inflated cut counts on specific work orders (`cut_events` history
+that no longer reflects a clean slate), and small 1×1-ft test splits/slivers
+left behind as inventory labels. `backend/scripts/reset-demo-data.js` cleans
+both up in a targeted way.
+
+**Same safety warning as the smoke test — it performs real deletions against
+real Digit data when run with `--confirm`.** Unlike the smoke test, though,
+it defaults to a dry run: with no `--confirm` flag it only reports what it
+would change, and it never acts on anything you didn't name explicitly (no
+"reset everything" mode) — nothing is deleted, locally or in Digit, without
+both an explicit target and `--confirm`.
+
+```bash
+# Dry run — reports counts and resolves labels, changes nothing:
+docker compose exec backend node scripts/reset-demo-data.js \
+  --work-order-ids=<digit work order id>,<another id> \
+  --labels=<label number>,<another label number>
+
+# Same command with --confirm actually executes it:
+docker compose exec backend node scripts/reset-demo-data.js \
+  --work-order-ids=<digit work order id> \
+  --labels=<label number> \
+  --confirm
+```
+
+- `--work-order-ids` — Digit work order ids (same ids used for
+  `SMOKE_WORK_ORDER_ID`). Deletes their `cut_events` and `scan_attempts` rows
+  so `cutCount` on the cut screen goes back to reflecting only real cuts.
+- `--labels` — label numbers (the human `#N`, e.g. `52`) to delete from
+  Digit's serialized inventory. Resolved to inventory ids first; a label
+  already picked into a job/sales order comes back from Digit as blocked
+  rather than deleted, and the script reports that explicitly rather than
+  forcing it through.
+- Either flag can be used alone or together. Running with no flags at all
+  prints usage and exits non-zero — it never guesses what you meant.
+- Always prints exactly what it did (or, in a dry run, would do) — a row
+  count deleted locally, and a per-label success/blocked/error line for
+  Digit deletions.

@@ -177,8 +177,12 @@ async function main() {
     check("remnant Parent Roll == source scancode", remnantDims?.parentRoll === sourceBefore.scanCodeSerialNumber);
   }
 
+  // Confirmed physical cut order (see SCHEMA_NOTES.md): the parent roll
+  // always loses the full cutLength and NEVER changes width, regardless of
+  // how narrow cutWidth is (checked against the original sourceWidth, not
+  // whatever cutWidth this run happens to use).
   check(
-    "source label's remaining dimensions updated (unchanged width, length - cutLength)",
+    "source label's remaining dimensions updated (unchanged width, length - cutLength, regardless of cutWidth)",
     approxEqual(sourceDimsAfter.rollWidth, sourceWidth) && approxEqual(sourceDimsAfter.rollLength, sourceDimsBefore.rollLength - CUT_LENGTH),
     `L=${sourceDimsAfter.rollLength} W=${sourceDimsAfter.rollWidth}`
   );

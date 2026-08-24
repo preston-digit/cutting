@@ -433,16 +433,17 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     const workingPieceBin = await resolvePickableBinForAddress(manufacturingAddressId);
     const workingPieceBinId = workingPieceBin.id;
 
-    // ⚠️ ASSUMED PHYSICAL CUT ORDER — not yet confirmed with the customer,
-    // see SCHEMA_NOTES.md ("Assumed physical cut order"). This assumes the
-    // full-width piece at cutLength comes off the roll FIRST, and cutWidth is
-    // then ripped out of THAT piece — so the side remnant is only cutLength
-    // long (same length as the cut), and the parent roll always loses the
-    // full cutLength regardless of how narrow cutWidth is. If the shop
-    // actually rips the width down the roll's full remaining length first,
-    // this produces a remnant of the wrong shape even though the areas below
-    // still reconcile exactly. Keep this in sync with the mirrored cut math
-    // in frontend/src/features/cutting/CutScreen.jsx.
+    // PHYSICAL CUT ORDER — confirmed 8/24/2026 with the customer, from the
+    // actual floor process (see SCHEMA_NOTES.md, "Confirmed physical cut
+    // order"): the operator crosscuts the full-width piece at cutLength off
+    // the roll FIRST, then rips cutWidth from THAT piece — so the side
+    // remnant is only cutLength long (same length as the cut), and the
+    // parent roll always loses the full cutLength regardless of how narrow
+    // cutWidth is. The source label's dimension update below must decrement
+    // length only and never touch width, regardless of cutWidth — verified
+    // by smoke-cut.js's "source label's remaining dimensions" check. Keep
+    // this in sync with the mirrored cut math in
+    // frontend/src/features/cutting/CutScreen.jsx.
     const cutArea = Number(cutWidth) * Number(cutLength);
     const hasSideRemnant = sourceWidth != null && Number(cutWidth) < sourceWidth;
     const remnantWidth = hasSideRemnant ? sourceWidth - Number(cutWidth) : null;

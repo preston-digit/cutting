@@ -253,15 +253,14 @@ float rounding), which is also what `quantityInStock` on the three labels sums
 to after the two `splitSerializedInventory` calls, since that mutation moves
 quantity rather than recomputing it independently.
 
-### ⚠️ Assumed physical cut order — needs validation with the customer
+### Confirmed physical cut order
 
-The math above encodes one specific assumption about how the operator
-physically cuts the roll, and it has never been confirmed against how the
-cutting table actually works: **the full-width piece at the requested
-`cutLength` comes off the parent roll first, and the requested `cutWidth` is
-then ripped out of *that* piece** — not the other way around (ripping the
-width down the full remaining length of the roll first, then crosscutting).
-Concretely, this module assumes:
+**Confirmed 8/24/2026 from the customer's floor:** the operator crosscuts
+the full-width piece at the requested `cutLength` off the parent roll
+*first*, then rips the requested `cutWidth` out of *that* piece *second* —
+not the other way around (ripping the width down the full remaining length
+of the roll first, then crosscutting). This module's math encodes exactly
+that order:
 
 1. Crosscut the source roll at `cutLength` → a `sourceWidth × cutLength`
    piece comes free of the roll.
@@ -274,17 +273,21 @@ Concretely, this module assumes:
    entire crosscut length; there is no assumption that a narrow cut could be
    ripped off the roll's existing width without shortening it.
 
-This is a real business-rule assumption, not just an implementation detail:
-if the shop actually rips the width down the roll's full remaining length
-first and crosscuts second, the remnant this module creates would have the
-wrong shape (a long, full-length offcut rather than a short, cut-length-only
-side remnant), even though the *areas* would still reconcile exactly (the
-math above is agnostic to cut order for area purposes — only the remnant's
-implied length/width split depends on it). **Flagged for explicit
-confirmation with the customer** — see also the mirrored comment in
-`backend/src/features/cutting/routes.js` (the authoritative implementation)
-and `frontend/src/features/cutting/CutScreen.jsx` (the live preview, which
-must keep matching it exactly).
+This was a real business-rule assumption, not just an implementation detail —
+had the shop actually ripped the width down the roll's full remaining length
+first and crosscut second, the remnant this module creates would have had
+the wrong shape (a long, full-length offcut rather than a short,
+cut-length-only side remnant), even though the *areas* would still reconcile
+exactly either way (the math above is agnostic to cut order for area
+purposes — only the remnant's implied length/width split depends on it). Now
+that it's confirmed, the source label's dimension write must decrement
+length only and never touch width, regardless of `cutWidth` — verified both
+by the code (see the mirrored comment in
+`backend/src/features/cutting/routes.js`, the authoritative implementation,
+and `frontend/src/features/cutting/CutScreen.jsx`, the live preview) and by
+`backend/scripts/smoke-cut.js`'s "source label's remaining dimensions
+updated" check, which asserts `rollWidth` unchanged and `rollLength`
+decremented by exactly `cutLength` after every commit.
 
 ## 4b. Live-discovered location constraints on split/pick (found building Step 4)
 

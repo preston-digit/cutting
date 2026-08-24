@@ -419,7 +419,7 @@ const FETCH_BY_SERIAL_NUMBER_QUERY = `
  */
 export function sanitizeScanValue(value) {
   return String(value ?? "")
-    .replace(/[ -]/g, "")
+    .replace(/[\x00-\x1f\x7f]/g, "")
     .trim();
 }
 
@@ -569,6 +569,36 @@ const INVENTORY_BY_ID_QUERY = `
 export async function getInventoryById(inventoryId) {
   const data = await digitRequest(INVENTORY_BY_ID_QUERY, { inventoryId });
   return data.inventory;
+}
+
+// --- Deleting serialized inventory (used only by scripts/reset-demo-data.js) ---
+// Live-confirmed via schema introspection: a real delete mutation exists
+// (not previously needed by the cutting flow itself, which only ever
+// splits/moves inventory). Digit still enforces referential integrity —
+// deleting a label picked into a job/order comes back with
+// blockingLinkedRecords rather than succeeding, which the caller must
+// surface rather than silently ignore.
+const DELETE_SERIALIZED_INVENTORIES_MUTATION = `
+  mutation ($input: DeleteSerializedInventoriesInput!) {
+    deleteSerializedInventories(input: $input) {
+      results {
+        inventoryId
+        success
+        errorMessage
+        blockingLinkedRecords {
+          salesOrders { id }
+          manufacturingOrders { id }
+        }
+      }
+    }
+  }
+`;
+
+export async function deleteSerializedInventories(inventoryIds) {
+  const data = await digitRequest(DELETE_SERIALIZED_INVENTORIES_MUTATION, {
+    input: { inventoryIds },
+  });
+  return data.deleteSerializedInventories.results;
 }
 
 // --- Warehouse locations (bins) ---------------------------------------------
