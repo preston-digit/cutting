@@ -20,6 +20,8 @@ import {
   searchWarehouseLocations,
   resolveWarehouseLocationByName,
   resolvePickableBinForAddress,
+  sanitizeScanValue,
+  looksLikeScancode,
 } from "./digitOps.js";
 
 const router = Router();
@@ -69,17 +71,32 @@ router.get("/queue", async (_req, res, next) => {
   }
 });
 
+// Pieces actually committed against this work order so far — the ONLY
+// correct input to "complete work order", never job.targetQuantity (that's
+// the goal, not what's actually been cut). Counts every cut_events row
+// regardless of session, since the table is the durable record.
+async function getCutCount(workOrderId) {
+  const db = assertDb();
+  const { rows } = await db.query(
+    `SELECT count(*)::int AS n FROM cut_events WHERE work_order_id = $1 AND status = 'completed'`,
+    [workOrderId]
+  );
+  return rows[0]?.n || 0;
+}
+
 // GET /api/cutting/work-orders/:id
 router.get("/work-orders/:id", async (req, res, next) => {
   try {
     const wo = await getWorkOrderDetail(req.params.id);
     if (!wo) return res.status(404).json({ error: "Work order not found" });
+    const cutCount = await getCutCount(wo.id);
     res.json({
       workOrderId: wo.id,
       workOrderNumber: wo.workOrderNumber,
       status: wo.status,
       expectedQuantity: wo.expectedQuantity,
       completedQuantity: wo.completedQuantity,
+      cutCount,
       binId: wo.warehouseLocation?.id,
       binName: wo.warehouseLocation?.locationCode,
       jobId: wo.job?.id,
@@ -106,24 +123,68 @@ router.get("/work-orders/:id", async (req, res, next) => {
   }
 });
 
-// GET /api/cutting/scan/:serial — barcode resolution (scancode, not Label #)
-router.get("/scan/:serial", async (req, res, next) => {
+// Records every scan/search attempt — resolved or not — so a floor failure
+// ("I scanned it and nothing happened") is diagnosable after the fact from
+// the raw value actually decoded. Logging failures never fail the request.
+async function logScanAttempt({ workOrderId, rawValue, sanitizedValue, method, outcome, resolvedInventoryId, matchCount, errorMessage }) {
   try {
-    const inventory = await resolveScannedSerial(req.params.serial);
-    if (!inventory) return res.status(404).json({ error: "No inventory label found for that scan" });
+    const db = assertDb();
+    await db.query(
+      `INSERT INTO scan_attempts
+         (work_order_id, raw_value, sanitized_value, resolution_method, outcome, resolved_inventory_id, match_count, error_message)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+      [workOrderId || null, rawValue, sanitizedValue, method, outcome, resolvedInventoryId || null, matchCount ?? null, errorMessage || null]
+    );
+  } catch (err) {
+    console.error("Failed to log scan attempt:", err.message);
+  }
+}
+
+// GET /api/cutting/scan/:serial — barcode resolution (scancode, not Label #).
+// Exact scancode match ONLY — a scanned/camera-decoded value never falls
+// through to a fuzzy search (a barcode is either the right label or it
+// isn't; guessing is worse than failing loudly). See SCHEMA_NOTES.md.
+router.get("/scan/:serial", async (req, res, next) => {
+  const rawValue = req.params.serial;
+  const sanitizedValue = sanitizeScanValue(rawValue);
+  const workOrderId = req.query.workOrderId || null;
+  try {
+    const inventory = await resolveScannedSerial(sanitizedValue);
+    if (!inventory) {
+      await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "not_found" });
+      return res.status(404).json({ error: `No label found for scancode "${sanitizedValue}"` });
+    }
+    await logScanAttempt({
+      workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "resolved",
+      resolvedInventoryId: inventory.id,
+    });
     res.json(withParsedDimensions(inventory));
   } catch (err) {
+    await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "not_found", errorMessage: err.message });
     next(err);
   }
 });
 
-// GET /api/cutting/search?q=... — manual fallback by Label # or item name
+// GET /api/cutting/search?q=... — manual fallback by Label # or item name.
+// Never used for a scancode-shaped value — that must go through /scan
+// above. Returns { matchType, results }; the frontend only auto-applies a
+// single result when matchType is an exact Label # match, never for a text
+// search (see SCHEMA_NOTES.md).
 router.get("/search", async (req, res, next) => {
+  const rawValue = req.query.q || "";
+  const sanitizedValue = sanitizeScanValue(rawValue);
+  const workOrderId = req.query.workOrderId || null;
   try {
-    const q = req.query.q || "";
-    const results = await searchInventories(q);
-    res.json(results.map(withParsedDimensions));
+    const { matchType, results } = await searchInventories(sanitizedValue);
+    const outcome = results.length === 0 ? "not_found" : matchType === "exact_label_number" && results.length === 1 ? "resolved" : "shown_for_selection";
+    await logScanAttempt({
+      workOrderId, rawValue, sanitizedValue, method: matchType, outcome,
+      resolvedInventoryId: outcome === "resolved" ? results[0].id : undefined,
+      matchCount: results.length,
+    });
+    res.json({ matchType, results: results.map(withParsedDimensions) });
   } catch (err) {
+    await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "text_search", outcome: "not_found", errorMessage: err.message });
     next(err);
   }
 });

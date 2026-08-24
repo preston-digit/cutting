@@ -11,6 +11,12 @@ import {
 import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
 
 const OPERATOR_STORAGE_KEY = "cutting.operatorName";
+// Mirrors backend/src/features/cutting/digitOps.js's looksLikeScancode/sanitizeScanValue —
+// used here only to decide which resolution path to take before calling the API.
+const SCANCODE_PATTERN = /^(mi|rcv|splt|job)_/;
+function sanitizeScanValue(value) {
+  return String(value ?? "").replace(/[\x00-\x1f\x7f]/g, "").trim();
+}
 const DIGIT_APP_BASE_URL = "https://app.digit-software.com"; // opened client-side; see SCHEMA_NOTES.md
 
 const COMMIT_STEP_LABELS = {
@@ -72,6 +78,7 @@ export default function CutScreen({ nav, workOrderId }) {
   const [cutLength, setCutLength] = useState("");
   const [remnantBin, setRemnantBin] = useState(null); // { id, name }
   const [binSearchResults, setBinSearchResults] = useState([]);
+  const [binsError, setBinsError] = useState(null);
 
   // --- Commit state -----------------------------------------------------------
   const [committing, setCommitting] = useState(false);
@@ -93,18 +100,22 @@ export default function CutScreen({ nav, workOrderId }) {
     };
   }, [workOrderId]);
 
-  // Guarded with a ref (not just the [] dep array) so React 18 StrictMode's
-  // dev-only double-invoke of effects — mount, cleanup, mount again, on the
-  // same instance — can't fire this network call twice. REMNANT_BIN_NAME is
+  // NOTE: an earlier ref-based guard here (meant to dedupe React 18
+  // StrictMode's dev-only double-invoke of effects) set the ref to "done" on
+  // the very first invocation, before any data had arrived — so the second
+  // (real) invocation skipped fetching entirely and the first invocation's
+  // own result was discarded by its own cleanup's `cancelled` flag. Net
+  // effect: the bin list never populated. A plain cancelled-flag effect (the
+  // standard React data-fetching idiom) fixes it — an extra harmless GET in
+  // dev is a fine price for the fetch actually running. REMNANT_BIN_NAME is
   // a convenience default only: if it doesn't resolve to a real bin (common
   // — it's an env var guess, not guaranteed to exist in this org), that's
   // not an error, the operator just picks one from the full list below.
-  const binsInitialized = useRef(false);
   useEffect(() => {
-    if (binsInitialized.current) return;
-    binsInitialized.current = true;
     let cancelled = false;
-    searchBins("").then((list) => !cancelled && setBinSearchResults(list));
+    searchBins("")
+      .then((list) => !cancelled && setBinSearchResults(list))
+      .catch((err) => !cancelled && setBinsError(err.message));
     getDefaultBin()
       .then((bin) => !cancelled && setRemnantBin(bin))
       .catch(() => {
@@ -119,32 +130,40 @@ export default function CutScreen({ nav, workOrderId }) {
     scanInputRef.current?.focus();
   }, []);
 
-  // Shared by the typed/USB-wedge path (form submit) and the camera path
-  // (a successful barcode decode) — both end up resolving the same value
-  // the same way.
-  async function resolveScan(value) {
-    const trimmed = value.trim();
-    if (!trimmed) return;
+  // Shared by the typed/USB-wedge path (form submit) and the camera path.
+  // A camera decode, or any typed value shaped like a Digit scancode, must
+  // resolve by EXACT scancode match only — never fall through to a fuzzy
+  // search, which would silently hand the operator the wrong roll. A typed
+  // value that isn't scancode-shaped uses the manual search path instead:
+  // an exact bare-number/"Label #9" match may auto-apply (it's exact, not
+  // fuzzy); anything else always shows a pick list, even for one result.
+  async function resolveScan(value, { fromCamera = false } = {}) {
+    const sanitized = sanitizeScanValue(value);
+    if (!sanitized) return;
     setScanning(true);
     setScanError(null);
     setSearchResults(null);
     try {
-      const result = await scanSerial(trimmed);
-      applySource(result);
-    } catch (err) {
-      // Not found by exact serial — try the manual search fallback automatically.
-      try {
-        const results = await searchInventory(trimmed);
-        if (results.length === 1) {
-          applySource(results[0]);
-        } else if (results.length > 1) {
-          setSearchResults(results);
-        } else {
-          setScanError(`No label found for "${trimmed}"`);
+      if (fromCamera || SCANCODE_PATTERN.test(sanitized)) {
+        try {
+          const result = await scanSerial(sanitized, workOrderId);
+          applySource(result);
+        } catch (err) {
+          setScanError(`No label found for scancode "${sanitized}"`);
         }
-      } catch (searchErr) {
-        setScanError(searchErr.message);
+        return;
       }
+
+      const { matchType, results } = await searchInventory(sanitized, workOrderId);
+      if (results.length === 0) {
+        setScanError(`No label found for "${sanitized}"`);
+      } else if (matchType === "exact_label_number" && results.length === 1) {
+        applySource(results[0]);
+      } else {
+        setSearchResults(results);
+      }
+    } catch (err) {
+      setScanError(err.message);
     } finally {
       setScanning(false);
     }
@@ -157,7 +176,7 @@ export default function CutScreen({ nav, workOrderId }) {
 
   function handleCameraDetected(rawValue) {
     setScannerOpen(false);
-    resolveScan(rawValue);
+    resolveScan(rawValue, { fromCamera: true });
   }
 
   function applySource(inv) {
@@ -206,6 +225,22 @@ export default function CutScreen({ nav, workOrderId }) {
     };
   }, [cutWidth, cutLength, source]);
 
+  // Reset back to the scan step for the next piece — the operator should be
+  // able to cut a whole work order in uninterrupted scan-measure-commit
+  // cycles without the screen dead-ending on a "committed" panel each time.
+  function resetForNextPiece() {
+    setSource(null);
+    setSearchResults(null);
+    setCutWidth("");
+    setCutLength("");
+    setSteps([]);
+    setCommitSummary(null);
+    setCommitError(null);
+    setScanInput("");
+    setScanError(null);
+    scanInputRef.current?.focus();
+  }
+
   async function handleCommit() {
     if (!cut || !source) return;
     setCommitting(true);
@@ -217,6 +252,7 @@ export default function CutScreen({ nav, workOrderId }) {
     plannedKeys.push("writeSourceDimensions", "pickWorkingPiece", "startWorkOrder");
     setSteps(plannedKeys.map((key) => ({ key, label: COMMIT_STEP_LABELS[key], status: "pending" })));
 
+    let summary = null;
     try {
       await commitCut(
         workOrderId,
@@ -229,6 +265,7 @@ export default function CutScreen({ nav, workOrderId }) {
         },
         (event) => {
           if (event.key === "summary") {
+            summary = event;
             setCommitSummary(event);
             return;
           }
@@ -239,6 +276,16 @@ export default function CutScreen({ nav, workOrderId }) {
           setSteps((prev) => prev.map((s) => (s.key === event.key ? { ...s, ...event } : s)));
         }
       );
+
+      if (summary?.status === "completed") {
+        const fresh = await getWorkOrder(workOrderId);
+        setWo(fresh);
+        if ((fresh.cutCount || 0) < fresh.targetQuantity) {
+          // Brief success confirmation, then clear back to the scan state
+          // automatically — more pieces remain on this work order.
+          setTimeout(resetForNextPiece, 2000);
+        }
+      }
     } catch (err) {
       setCommitError(err.message);
     } finally {
@@ -247,8 +294,15 @@ export default function CutScreen({ nav, workOrderId }) {
   }
 
   async function handleCompleteCut() {
+    const cutCount = wo.cutCount || 0;
+    if (cutCount < wo.targetQuantity) {
+      const proceed = window.confirm(
+        `Only ${cutCount} of ${wo.targetQuantity} pieces have been cut. Complete the work order early anyway?`
+      );
+      if (!proceed) return;
+    }
     try {
-      await completeWorkOrder(workOrderId, wo.targetQuantity);
+      await completeWorkOrder(workOrderId, cutCount);
       const fresh = await getWorkOrder(workOrderId);
       setWo(fresh);
     } catch (err) {
@@ -259,7 +313,8 @@ export default function CutScreen({ nav, workOrderId }) {
   if (loadError) return <div className="checklist-error-box" style={{ margin: "var(--space-5)" }}>{loadError}</div>;
   if (!wo) return <div style={{ padding: "var(--space-5)" }} className="muted">Loading…</div>;
 
-  const progressPct = wo.targetQuantity ? Math.min(100, (wo.completedQuantity / wo.targetQuantity) * 100) : 0;
+  const cutCount = wo.cutCount || 0;
+  const progressPct = wo.targetQuantity ? Math.min(100, (cutCount / wo.targetQuantity) * 100) : 0;
   const committed = commitSummary?.status === "completed";
 
   // The split and its paired dimension write are separate checklist steps —
@@ -522,6 +577,11 @@ export default function CutScreen({ nav, workOrderId }) {
                           <span className="mono">{cut.sourceWidthAfter} × {cut.sourceLengthAfter} ft</span>.
                         </div>
                       )}
+                      {binsError && (
+                        <div className="checklist-error-box" style={{ marginBottom: "var(--space-2)" }}>
+                          Could not load bin list: {binsError}
+                        </div>
+                      )}
                       {cut.hasSideRemnant && !remnantBin && (
                         <div className="warning-box" style={{ marginBottom: "var(--space-2)" }}>Select a remnant bin</div>
                       )}
@@ -587,11 +647,6 @@ export default function CutScreen({ nav, workOrderId }) {
               >
                 Open serialized inventory list ↗
               </button>
-              <div style={{ marginTop: "var(--space-4)" }}>
-                <button className="btn btn--primary" onClick={handleCompleteCut} disabled={wo.status === "COMPLETED"}>
-                  {wo.status === "COMPLETED" ? "Work order completed" : "Complete cut"}
-                </button>
-              </div>
             </div>
           )}
         </div>
@@ -610,8 +665,17 @@ export default function CutScreen({ nav, workOrderId }) {
             <div className="progress-bar-track">
               <div className="progress-bar-fill" style={{ width: `${progressPct}%` }} />
             </div>
-            <div className="progress-bar-label">{wo.completedQuantity} / {wo.targetQuantity}</div>
+            <div className="progress-bar-label">{cutCount} of {wo.targetQuantity} cut</div>
           </div>
+
+          <button
+            className="btn btn--primary"
+            style={{ width: "100%", justifyContent: "center", marginBottom: "var(--space-4)" }}
+            onClick={handleCompleteCut}
+            disabled={wo.status === "COMPLETED" || cutCount === 0}
+          >
+            {wo.status === "COMPLETED" ? "Work order completed" : `Complete ${cutCount} of ${wo.targetQuantity}`}
+          </button>
 
           <div className="kv-list">
             <div className="kv-row">

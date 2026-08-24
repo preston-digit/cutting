@@ -9,11 +9,16 @@ export const getQueue = () => apiRequest("/api/cutting/queue");
 
 export const getWorkOrder = (workOrderId) => apiRequest(`/api/cutting/work-orders/${workOrderId}`);
 
-export const scanSerial = (serial) =>
-  apiRequest(`/api/cutting/scan/${encodeURIComponent(serial)}`);
+export const scanSerial = (serial, workOrderId) =>
+  apiRequest(
+    `/api/cutting/scan/${encodeURIComponent(serial)}${workOrderId ? `?workOrderId=${encodeURIComponent(workOrderId)}` : ""}`
+  );
 
-export const searchInventory = (q) =>
-  apiRequest(`/api/cutting/search?q=${encodeURIComponent(q)}`);
+// Returns { matchType, results } — see backend/src/features/cutting/routes.js.
+export const searchInventory = (q, workOrderId) =>
+  apiRequest(
+    `/api/cutting/search?q=${encodeURIComponent(q)}${workOrderId ? `&workOrderId=${encodeURIComponent(workOrderId)}` : ""}`
+  );
 
 export const searchBins = (q) => apiRequest(`/api/cutting/bins?q=${encodeURIComponent(q || "")}`);
 

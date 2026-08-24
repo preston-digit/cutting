@@ -376,6 +376,23 @@ const FETCH_BY_SERIAL_NUMBER_QUERY = `
   }
 `;
 
+/**
+ * Trim whitespace and strip non-printing/control characters from a decoded
+ * scan value before any lookup — USB-wedge scanners and camera decodes can
+ * append a trailing newline/carriage-return or other control bytes that
+ * would otherwise make an exact match silently fail.
+ */
+export function sanitizeScanValue(value) {
+  return String(value ?? "")
+    .replace(/[ -]/g, "")
+    .trim();
+}
+
+/** A value shaped like a Digit scancode (scanCodeSerialNumber) — must resolve exactly, never via fuzzy search. */
+export function looksLikeScancode(value) {
+  return /^(mi|rcv|splt|job)_/.test(value);
+}
+
 /** Resolves a scanned barcode. Barcodes encode scanCodeSerialNumber, not the human Label #. */
 export async function resolveScannedSerial(serialNumber) {
   let data;
@@ -429,7 +446,13 @@ function normalizeLabelQuery(term) {
 const LABEL_NUMBER_LOOKUP_PAGE_SIZE = 500;
 const TEXT_SEARCH_PAGE_SIZE = 20;
 
-/** Manual fallback search by label number (scanCodeNumber) or item name. */
+/**
+ * Manual fallback search by label number (scanCodeNumber) or item name.
+ * Returns { matchType, results } — matchType tells the caller whether this
+ * was an exact "Label #N" lookup (safe to auto-apply a single result) or a
+ * free-text search (never auto-apply; always show as a pick list, even for
+ * a single row — see SCHEMA_NOTES.md's scan-resolution rules).
+ */
 export async function searchInventories(term) {
   const normalized = normalizeLabelQuery(term);
   const asNumber = Number(normalized);
@@ -440,9 +463,10 @@ export async function searchInventories(term) {
       search: null,
       first: LABEL_NUMBER_LOOKUP_PAGE_SIZE,
     });
-    return data.inventories.nodes.filter(
+    const results = data.inventories.nodes.filter(
       (n) => n.scanCodeNumber === asNumber && n.quantityInStock > 0
     );
+    return { matchType: "exact_label_number", results };
   }
 
   const data = await digitRequest(SEARCH_INVENTORIES_QUERY, {
@@ -451,7 +475,8 @@ export async function searchInventories(term) {
   });
   // Zero-quantity labels have already been fully consumed into a job and
   // can't be cut from again — exclude them rather than show a dead end.
-  return data.inventories.nodes.filter((n) => n.quantityInStock > 0);
+  const results = data.inventories.nodes.filter((n) => n.quantityInStock > 0);
+  return { matchType: "text_search", results };
 }
 
 const INVENTORY_BY_ID_QUERY = `
