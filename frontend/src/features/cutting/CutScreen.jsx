@@ -59,6 +59,29 @@ function ChecklistIcon({ status }) {
   return <span className={`checklist-icon checklist-icon--${status}`}>{symbol}</span>;
 }
 
+// sufficient is true/false/null (null = no basis to judge — no required cut
+// could be resolved at all, see routes.js's resolveRequiredCut).
+function SufficiencyBadge({ sufficient }) {
+  if (sufficient === true) return <span className="pill pill--green">Sufficient</span>;
+  if (sufficient === false) return <span className="pill pill--neutral">Insufficient</span>;
+  return <span className="pill pill--warning">Unknown</span>;
+}
+
+// Describes what sufficiency is being judged against, so the ordering reads
+// as legible math rather than a magic sort. required comes from the
+// backend's resolveRequiredCut(); areaSymbol is the BOM component's own UoM.
+function requiredCutLabel(required, areaSymbol) {
+  if (!required) return null;
+  if (required.width != null && required.length != null) {
+    const suffix = required.source === "item_name" ? " (parsed from item name)" : required.source === "operator_entry" ? " (as entered)" : "";
+    return `Comparing against ${formatDims(required.width, required.length, areaSymbol)} — ${formatArea(required.area, areaSymbol)} per rug${suffix}`;
+  }
+  if (required.area != null) {
+    return `Comparing against ${formatArea(required.area, areaSymbol)} per rug (dimensions not available — enter cut width/length above for an exact fit check)`;
+  }
+  return "Not enough information yet to judge which pieces are sufficient — enter cut width and length.";
+}
+
 export default function CutScreen({ nav, workOrderId }) {
   const [wo, setWo] = useState(null);
   const [loadError, setLoadError] = useState(null);
@@ -85,8 +108,8 @@ export default function CutScreen({ nav, workOrderId }) {
   const [binsError, setBinsError] = useState(null);
   const [cutNotes, setCutNotes] = useState("");
 
-  // --- Available material (BOM component stock, sorted remnant-first) ------
-  const [availableMaterial, setAvailableMaterial] = useState(null);
+  // --- Available material (BOM component stock, sorted by sufficiency) -----
+  const [availableMaterial, setAvailableMaterial] = useState(null); // { requiredCut, pieces }
   const [availableMaterialError, setAvailableMaterialError] = useState(null);
 
   // --- Commit state -----------------------------------------------------------
@@ -480,21 +503,25 @@ export default function CutScreen({ nav, workOrderId }) {
             </div>
           )}
 
-          {!committed && availableMaterial && availableMaterial.length > 0 && (
+          {!committed && availableMaterial && availableMaterial.pieces?.length > 0 && (
             <div style={{ marginBottom: "var(--space-4)" }}>
               <div className="section-label" style={{ marginBottom: "var(--space-2)" }}>
                 Available material
                 <span className="muted" style={{ fontWeight: 400 }}> — click a row to select it, or scan a roll directly</span>
               </div>
+              <div className="muted" style={{ marginBottom: "var(--space-2)", fontSize: "var(--fs-sm)" }}>
+                {requiredCutLabel(availableMaterial.requiredCut, wo.bomComponents?.[0]?.uom?.symbol)}
+              </div>
               <div className="card" style={{ padding: 0 }}>
                 <div className="table-head-row">
                   <div className="col">Label</div>
                   <div className="col">Type</div>
+                  <div className="col">Fits?</div>
                   <div className="col">Dimensions</div>
                   <div className="col">Owner</div>
                   <div className="col">Bin</div>
                 </div>
-                {availableMaterial.map((p) => (
+                {availableMaterial.pieces.map((p) => (
                   <div key={p.id} className="row" onClick={() => applySource(p)}>
                     <div className="col">
                       Label #{p.labelNumber} <span className="muted mono">({formatArea(p.quantityInStock, p.areaUom?.symbol)})</span>
@@ -504,8 +531,26 @@ export default function CutScreen({ nav, workOrderId }) {
                         {p.pieceType === "Remnant" ? "Remnant" : p.pieceType || "Mill Roll"}
                       </span>
                     </div>
+                    <div className="col">
+                      <SufficiencyBadge sufficient={p.sufficient} />
+                    </div>
                     <div className="col mono">
-                      {p.knownDims ? formatDims(p.rollWidth, p.rollLength, p.areaUom?.symbol) : <span className="negative">unknown/out of sync</span>}
+                      {p.knownDims ? (
+                        <>
+                          {formatDims(p.rollWidth, p.rollLength, p.areaUom?.symbol)}
+                          {p.areaMismatch?.outOfSync && (
+                            <span
+                              className="warning-text"
+                              style={{ marginLeft: "var(--space-1)", cursor: "help" }}
+                              title={`Out of sync: quantity in stock is ${formatArea(p.areaMismatch.quantityInStock, p.areaUom?.symbol)}, but Roll Length × Roll Width implies ${formatArea(p.areaMismatch.impliedArea, p.areaUom?.symbol)}. Numbers shown are what's stored in Digit — confirm at the rack.`}
+                            >
+                              ⚠
+                            </span>
+                          )}
+                        </>
+                      ) : (
+                        <span className="muted">unknown</span>
+                      )}
                     </div>
                     <div className="col">{p.owner ?? "—"}</div>
                     <div className="col">{p.binName}</div>

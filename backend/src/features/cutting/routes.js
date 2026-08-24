@@ -137,50 +137,123 @@ router.get("/work-orders/:id", async (req, res, next) => {
   }
 });
 
+// Digit has no structured field for a finished item's target cut dimensions
+// (item-context custom fields exist for "Roll Length"/"Roll Width" but only
+// on roll-goods items, never populated on the finished item itself — see
+// SCHEMA_NOTES.md). Closest working path: prefer the operator's own entered
+// cutWidth/cutLength (most authoritative — it's literally what's about to be
+// cut); else try to parse a "W x L" shape out of the finished item's name
+// (e.g. "Rug 5x8"); else fall back to the BOM's quantityPerUnit as a
+// required AREA only (no shape judgment possible, just "is there enough
+// material"). Returns { width, length, area, source } — width/length are
+// null when only an area figure is available.
+const DIMENSION_IN_NAME_PATTERN = /(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)/i;
+
+function resolveRequiredCut({ cutWidth, cutLength, itemName, quantityPerUnit }) {
+  if (cutWidth > 0 && cutLength > 0) {
+    return { width: cutWidth, length: cutLength, area: cutWidth * cutLength, source: "operator_entry" };
+  }
+  const match = itemName ? String(itemName).match(DIMENSION_IN_NAME_PATTERN) : null;
+  if (match) {
+    const a = Number(match[1]);
+    const b = Number(match[2]);
+    if (a > 0 && b > 0) return { width: a, length: b, area: a * b, source: "item_name" };
+  }
+  if (quantityPerUnit > 0) {
+    return { width: null, length: null, area: quantityPerUnit, source: "bom_quantity_per_unit" };
+  }
+  return { width: null, length: null, area: null, source: "none" };
+}
+
+// Sufficiency means the piece's own dimensions can physically yield the
+// finished shape, not just that its area is large enough — a 100 × 1 ft
+// strip is 100 ft² but can't make a 5 × 8 rug. Checked both ways round
+// (width/length aren't a meaningful axis label on a roll) so a piece
+// doesn't fail just because its long side happens to map to "width."
+// null/out-of-sync dimensions are NOT "unknown" here — this only tiers on
+// whether Roll Length/Width are populated at all (see withParsedDimensions);
+// an area-mismatched piece still has real numbers to judge sufficiency by,
+// it's just flagged separately for the operator to double check.
+function scorePiece(p, required) {
+  const knownDims = p.rollWidth != null && p.rollLength != null;
+  const area = knownDims ? p.rollWidth * p.rollLength : null;
+  let sufficient = null; // null = no basis to judge (no required cut resolved at all)
+  let waste = null;
+  if (knownDims && required.width != null && required.length != null) {
+    sufficient =
+      (p.rollWidth >= required.width && p.rollLength >= required.length) ||
+      (p.rollWidth >= required.length && p.rollLength >= required.width);
+    if (sufficient) waste = area - required.width * required.length;
+  } else if (knownDims && required.area != null) {
+    sufficient = area >= required.area;
+    if (sufficient) waste = area - required.area;
+  }
+  let tier;
+  if (!knownDims) tier = 2;
+  else if (sufficient === false) tier = 1;
+  else tier = 0; // sufficient === true, or null (indeterminate — no target resolved)
+  return { ...p, knownDims, area, sufficient, waste, tier };
+}
+
 // GET /api/cutting/work-orders/:id/available-material?cutWidth=&cutLength=
-// Every in-stock serialized label of this job's BOM component item(s), so
-// the operator can decide which piece to send the forklift for instead of
-// scanning blind. cutWidth/cutLength are optional — when the operator has
-// already entered them, sufficiency and waste can be computed exactly;
-// without them, pieces just sort remnant-first by ascending size.
+// Every in-stock, really-pickable serialized label of this job's BOM
+// component item(s), so the operator can decide which piece to send the
+// forklift for instead of scanning blind.
 //
-// Sort priority (deliberately remnant-first — the business wants offcuts
-// consumed before a new roll is opened):
-//   1. pieces that can satisfy the requested cut, least waste first
-//   2. pieces that are known but too small for the requested cut
-//   3. pieces with unknown or out-of-sync dimensions, always last
-// Piece Type (Remnant vs Mill Roll) breaks ties within a tier.
+// Sort priority (deliberately remnant-first within each tier — the business
+// wants existing offcuts consumed before a new roll is opened):
+//   1. pieces that can satisfy the cut, smallest first (least waste)
+//   2. pieces that cannot satisfy the cut, largest first
+//   3. pieces with unknown (genuinely empty) dimensions, always last
 router.get("/work-orders/:id/available-material", async (req, res, next) => {
   try {
     const wo = await getWorkOrderDetail(req.params.id);
     if (!wo) return res.status(404).json({ error: "Work order not found" });
-    const itemIds = (wo.job?.bom?.items?.nodes || []).map((n) => n.item.id);
+    const bomNodes = wo.job?.bom?.items?.nodes || [];
+    const itemIds = bomNodes.map((n) => n.item.id);
+    const quantityPerUnitByItemId = new Map(bomNodes.map((n) => [n.item.id, n.quantity]));
     const cutWidth = req.query.cutWidth ? Number(req.query.cutWidth) : null;
     const cutLength = req.query.cutLength ? Number(req.query.cutLength) : null;
-    const hasTarget = cutWidth > 0 && cutLength > 0;
 
     const nodes = await getInventoriesForItems(itemIds);
-    const pieces = nodes.map(withParsedDimensions).map((p) => {
-      const knownDims = p.rollWidth != null && p.rollLength != null && !p.areaMismatch?.outOfSync;
-      const area = knownDims ? p.rollWidth * p.rollLength : null;
-      const sufficient = knownDims && hasTarget ? p.rollWidth >= cutWidth && p.rollLength >= cutLength : knownDims;
-      const waste = sufficient && hasTarget ? area - cutWidth * cutLength : area;
-      let tier;
-      if (!knownDims) tier = 2;
-      else if (hasTarget && !sufficient) tier = 1;
-      else tier = 0;
-      return { ...p, knownDims, sufficient, waste, tier };
+    // "transit"/"workCenter"/"unassigned" locations aren't real, pickable
+    // storage (live-confirmed via WarehouseLocationType enum, not by
+    // matching a location's name/code) — material sitting in one (e.g. an
+    // IN-TRANSIT system bin mid-transfer) can't actually be picked up.
+    const pickableNodes = nodes.filter((n) => isRealStorageBin(n.warehouseLocation?.type));
+    const pieces = pickableNodes.map(withParsedDimensions).map((p) => {
+      const required = resolveRequiredCut({
+        cutWidth,
+        cutLength,
+        itemName: wo.job?.item?.name,
+        quantityPerUnit: quantityPerUnitByItemId.get(p.itemId),
+      });
+      return { ...scorePiece(p, required), requiredCut: required };
     });
 
     pieces.sort((a, b) => {
       if (a.tier !== b.tier) return a.tier - b.tier;
-      if (a.waste !== b.waste) return (a.waste ?? Infinity) - (b.waste ?? Infinity);
+      if (a.tier === 0) {
+        const aw = a.waste ?? a.area ?? Infinity;
+        const bw = b.waste ?? b.area ?? Infinity;
+        if (aw !== bw) return aw - bw;
+      } else if (a.tier === 1) {
+        if (a.area !== b.area) return (b.area ?? 0) - (a.area ?? 0); // largest first
+      }
       const aRemnant = a.pieceType === "Remnant" ? 0 : 1;
       const bRemnant = b.pieceType === "Remnant" ? 0 : 1;
       return aRemnant - bRemnant;
     });
 
-    res.json(pieces);
+    res.json({
+      requiredCut: pieces[0]?.requiredCut || resolveRequiredCut({
+        cutWidth,
+        cutLength,
+        itemName: wo.job?.item?.name,
+        quantityPerUnit: bomNodes[0]?.quantity,
+      }),
+      pieces,
+    });
   } catch (err) {
     next(err);
   }

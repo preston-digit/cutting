@@ -165,6 +165,7 @@ body {
 .pill--blue { background: var(--status-blue-bg-solid); color: var(--status-blue-fg); }
 .pill--purple { background: var(--status-purple-bg-solid); color: var(--status-purple-fg); }
 .pill--neutral { background: var(--status-neutral-bg-solid); color: var(--status-neutral-fg); }
+.pill--warning { background: var(--color-warning-box-bg); color: var(--color-warning-box-fg); }
 .negative { color: var(--color-negative); }
 .warning-text { color: var(--color-warning-box-fg); }
 
