@@ -7,6 +7,8 @@
 // splitSerializedInventory moves ft² between labels without ever touching a
 // label's Roll Length / Roll Width custom fields.
 import { digitRequest } from "../../core/digit.js";
+export { parseDimensionText, formatFeetInches } from "./dimensions.js";
+import { parseDimensionText, roundDecimalFeet } from "./dimensions.js";
 
 const CUTTING_STEP_NAME = process.env.CUTTING_STEP_NAME || "Cut to Size";
 
@@ -62,15 +64,27 @@ async function getPieceTypeOptionId(label) {
   return id;
 }
 
+/**
+ * Reverse of getCustomFieldId — given a custom field id (as found on a
+ * label template's cf_<id> binding key), returns the field's name so its
+ * live value can be looked up in readInventoryCustomFields()'s `.raw` map.
+ * Used only by the label renderer (labelTemplate.js/labelRenderer.js) to
+ * resolve template bindings against live inventory custom fields.
+ */
+export async function getCustomFieldNameById(id) {
+  if (!customFieldCache) await loadCustomFieldCache();
+  for (const [name, field] of Object.entries(customFieldCache)) {
+    if (field.id === id) return name;
+  }
+  return null;
+}
+
 // --- Custom field read/write helpers ---------------------------------------
 // Bare numbers only — see SCHEMA_NOTES.md ("write bare numbers" correction).
-// Reads stay lenient (parseDimensionText below) since older/dummy records in
-// this org are inconsistently formatted.
-export function parseDimensionText(text) {
-  if (!text) return null;
-  const match = String(text).match(/[\d.]+/);
-  return match ? Number(match[0]) : null;
-}
+// Reads stay lenient (parseDimensionText, in ./dimensions.js) since older
+// records in this org are inconsistently formatted, INCLUDING real
+// feet-and-inches notation (13'-2") seen on live customer tags — see
+// dimensions.js's header comment and dimensions.test.js.
 
 // Some fields' stored/option values redundantly repeat the field's own name
 // as a prefix — and not always the FULL name: live-confirmed cases are
@@ -104,13 +118,116 @@ export function itemUom(item) {
   return { symbol: uom.symbol, name: uom.name, type: uom.type };
 }
 
-/** "ft²" -> "ft", "sq yd" -> "yd" — best-effort, falls back to the area symbol unchanged. */
-export function deriveLinearUnitSymbol(areaSymbol) {
+// CANONICAL UNIT-BASIS RULE (see SCHEMA_NOTES.md's "Canonical unit-basis
+// rule" section): Roll Length/Roll Width carry NO unit metadata of their
+// own and none will be added — a bare number in these fields is always
+// denominated in the linear unit implied by the item's defaultStockUom.
+// This table is the SINGLE source of that mapping — every other place that
+// needs a linear unit or a unit-conversion factor (display formatting, the
+// geometry boundary's requireLinearUnit() below, the ratio-aware
+// unit-mismatch check, migrate-dimension-units.js) goes through it rather
+// than re-deriving one. Extend this table when the org adds a new
+// defaultStockUom; never guess a mapping for an unrecognized one.
+const AREA_UNIT_TABLE = {
+  "ft²": { linear: "ft", ftPerUnit: 1 },
+  "sq ft": { linear: "ft", ftPerUnit: 1 },
+  "sqft": { linear: "ft", ftPerUnit: 1 },
+  "yd²": { linear: "yd", ftPerUnit: 3 },
+  "sq yd": { linear: "yd", ftPerUnit: 3 },
+  "sqyd": { linear: "yd", ftPerUnit: 3 },
+  "m²": { linear: "m", ftPerUnit: 3.28084 },
+  "sq m": { linear: "m", ftPerUnit: 3.28084 },
+  "sqm": { linear: "m", ftPerUnit: 3.28084 },
+};
+
+function areaUnitTableEntry(areaSymbol) {
   if (!areaSymbol) return null;
-  if (areaSymbol.endsWith("²")) return areaSymbol.slice(0, -1);
-  const sq = areaSymbol.match(/^sq\.?\s*(.+)$/i);
-  if (sq) return sq[1];
-  return areaSymbol;
+  return AREA_UNIT_TABLE[String(areaSymbol).trim().toLowerCase()] || null;
+}
+
+/**
+ * Linear unit implied by an area UoM symbol, from AREA_UNIT_TABLE — display
+ * use only. Returns null for an unrecognized symbol (e.g. a count unit like
+ * "ea", or a genuinely new area unit not yet added to the table) rather than
+ * guessing; callers that need a hard guarantee (the geometry boundary) must
+ * use requireLinearUnit() instead, which throws.
+ */
+export function deriveLinearUnitSymbol(areaSymbol) {
+  return areaUnitTableEntry(areaSymbol)?.linear ?? null;
+}
+
+/**
+ * Asserts the item's defaultStockUom resolves to a recognized linear unit
+ * and returns it — call this at the top of any geometry path (the cut
+ * commit) before doing arithmetic with Roll Length/Width. Throws rather
+ * than silently assuming feet, per the canonical unit-basis rule: an
+ * unrecognized area unit means this module cannot safely interpret the
+ * dimension custom fields at all.
+ */
+export function requireLinearUnit(item) {
+  const uom = itemUom(item);
+  const entry = areaUnitTableEntry(uom?.symbol);
+  if (!entry) {
+    throw new Error(
+      `Item's stock UoM "${uom?.symbol ?? "(none)"}" is not a recognized area unit ` +
+        `(see AREA_UNIT_TABLE in digitOps.js) — cannot determine what linear unit Roll ` +
+        `Length/Roll Width are denominated in. Add this unit to AREA_UNIT_TABLE before ` +
+        `cutting this item.`
+    );
+  }
+  return entry.linear;
+}
+
+// Every pairwise ratio of two recognized area units' ft-equivalent factors,
+// squared — i.e. the "if these dimensions were measured in one unit but
+// quantityInStock is denominated in another, what ratio would that produce"
+// set (9/1-9 for ft<->yd, ~10.76/1-10.76 for ft<->m, etc.), derived from
+// AREA_UNIT_TABLE rather than hardcoded so a newly added unit is covered
+// automatically. Same-unit pairs (ratio 1) are dropped — that's not a
+// mismatch signature, it's agreement.
+const KNOWN_UNIT_MISMATCH_AREA_RATIOS = (() => {
+  const factors = [...new Set(Object.values(AREA_UNIT_TABLE).map((e) => e.ftPerUnit))];
+  const ratios = new Set();
+  for (const a of factors) {
+    for (const b of factors) {
+      const r = (a / b) ** 2;
+      if (Math.abs(r - 1) > 0.001) ratios.add(r);
+    }
+  }
+  return [...ratios];
+})();
+
+const UNIT_MISMATCH_RATIO_TOLERANCE = 0.03; // 3%
+
+/**
+ * True if impliedArea/quantityInStock lands within tolerance of a known
+ * unit-conversion square — i.e. the mismatch looks like the dimensions and
+ * quantityInStock were recorded in two different (but both recognized)
+ * units, not just a data-entry error. See withParsedDimensions() in
+ * routes.js, which uses this to decide whether an out-of-sync piece stays
+ * selectable (generic bad data, ack-and-proceed) or is blocked outright
+ * (probable unit mismatch, needs a fix in Digit first).
+ */
+export function isUnitMismatchRatio(quantityInStock, impliedArea) {
+  if (!quantityInStock || !impliedArea) return false;
+  const ratio = impliedArea / quantityInStock;
+  return KNOWN_UNIT_MISMATCH_AREA_RATIOS.some((r) => Math.abs(ratio - r) / r <= UNIT_MISMATCH_RATIO_TOLERANCE);
+}
+
+/**
+ * ft-equivalent factor for one unit of the given linear unit symbol ("ft",
+ * "yd", "m"), from AREA_UNIT_TABLE — used only by
+ * scripts/migrate-dimension-units.js to compute a conversion factor between
+ * two linear units. Returns null for an unrecognized symbol.
+ */
+export function linearUnitFtPerUnit(linearSymbol) {
+  const entry = Object.values(AREA_UNIT_TABLE).find((e) => e.linear === linearSymbol);
+  return entry ? entry.ftPerUnit : null;
+}
+
+/** Linear unit symbols this module recognizes — for CLI usage/validation messages. */
+export function recognizedLinearUnits() {
+  return [...new Set(Object.values(AREA_UNIT_TABLE).map((e) => e.linear))];
 }
 
 // WarehouseLocationType enum (live-confirmed): bin, transit, workCenter,
@@ -140,6 +257,23 @@ export function readInventoryCustomFields(inventory) {
   };
 }
 
+/**
+ * The UNSTRIPPED stored value of a custom field — screen display goes
+ * through readInventoryCustomFields() above (which strips the redundant
+ * "Owner: "/"Piece Type: " prefix some of this org's field/option values
+ * carry, for a cleaner UI), but the printed tag must not: Digit's own
+ * Reprint of the same template renders the raw stored value verbatim
+ * ("Piece Type: Remnant", "Owner: The Dixie Group"), so this app's render
+ * has to match that field-for-field rather than diverge based on who
+ * printed it. Used only by labelRenderer.js — never call this for anything
+ * shown on screen.
+ */
+export function rawCustomFieldValue(inventory, fieldName) {
+  const field = (inventory.customFields || []).find((f) => f.fieldName === fieldName);
+  if (!field) return null;
+  return field.fieldValueText ?? field.fieldValueOption?.value ?? null;
+}
+
 const UPDATE_INVENTORY_CUSTOM_FIELDS_MUTATION = `
   mutation ($input: UpdateSerializedInventoryInput!) {
     updateSerializedInventory(input: $input) {
@@ -158,6 +292,13 @@ const UPDATE_INVENTORY_CUSTOM_FIELDS_MUTATION = `
  * and Parent Roll on a label. Called once per label per commit, in the same
  * step group as the split/creation that changed its quantity — see
  * SCHEMA_NOTES.md's "sole keeper of dimensional truth" section.
+ *
+ * rollLength/rollWidth are rounded (roundDecimalFeet, dimensions.js) before
+ * being stringified — subtracting/summing decimal-feet values upstream
+ * (e.g. sourceLength - cutLength) routinely lands on IEEE 754 noise like
+ * 13.299999999999999; this is the one place every dimension write funnels
+ * through, so it's the right place to kill that noise once rather than at
+ * every call site that does dimension arithmetic.
  */
 export async function writeInventoryDimensions(
   inventoryId,
@@ -165,10 +306,10 @@ export async function writeInventoryDimensions(
 ) {
   const customFields = [];
   if (rollLength != null) {
-    customFields.push({ fieldId: await getCustomFieldId("Roll Length"), fieldValueText: String(rollLength) });
+    customFields.push({ fieldId: await getCustomFieldId("Roll Length"), fieldValueText: String(roundDecimalFeet(rollLength)) });
   }
   if (rollWidth != null) {
-    customFields.push({ fieldId: await getCustomFieldId("Roll Width"), fieldValueText: String(rollWidth) });
+    customFields.push({ fieldId: await getCustomFieldId("Roll Width"), fieldValueText: String(roundDecimalFeet(rollWidth)) });
   }
   if (pieceType) {
     customFields.push({
@@ -559,7 +700,9 @@ const INVENTORY_BY_ID_QUERY = `
       quantityInStock
       scanCodeSerialNumber
       scanCodeNumber
-      item { id name defaultStockUom { symbol name type } }
+      lotNumber
+      createdAt
+      item { id name sku defaultStockUom { symbol name type } }
       warehouseLocation { id locationCode type }
       customFields { fieldName fieldValueText fieldValueOption { value } }
     }
