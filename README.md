@@ -208,6 +208,7 @@ See [.env.example](.env.example). Key ones:
 | `CUTTING_STEP_NAME`    | Digit routing step the cutting queue watches (default `Cut to Size`) |
 | `REMNANT_BIN_NAME`     | Default bin for side remnants (changeable per-cut in the UI) |
 | `DIGIT_APP_BASE_URL`   | Digit's own frontend — used for the "open serialized inventory list to reprint a label" link (see SCHEMA_NOTES.md) |
+| `ALLOW_PRINTLESS_COMMITS` | Defaulted OFF. When unset/`false`, a commit is blocked before any split/write if the source item has no resolvable `manualInventory` label template — a cut that can't produce a tag must never complete. Set to `"true"` only for an org that genuinely doesn't print labels. |
 
 ## Smoke test (cutting commit flow)
 
@@ -280,3 +281,39 @@ docker compose exec backend node scripts/reset-demo-data.js \
 - Always prints exactly what it did (or, in a dry run, would do) — a row
   count deleted locally, and a per-label success/blocked/error line for
   Digit deletions.
+
+## Migrating Roll Length/Width to a new linear unit
+
+`Roll Length`/`Roll Width` carry no unit metadata of their own — a bare
+number in these fields is always denominated in the linear unit implied by
+the item's `defaultStockUom` (see `SCHEMA_NOTES.md`'s "Canonical unit-basis
+rule"). If an item's `defaultStockUom` changes org-wide (e.g. `ft²` → `yd²`),
+every existing `Roll Length`/`Roll Width` value on that item's labels needs
+to be rewritten into the new linear unit — `backend/scripts/migrate-dimension-units.js`
+does that, in the same safe-by-default pattern as `reset-demo-data.js`.
+
+```bash
+# Dry run — reports every label it would rewrite, with before/after values:
+docker compose exec backend node scripts/migrate-dimension-units.js \
+  --item-ids=<digit item id>,<another id> --from=ft --to=yd
+
+# Same command with --confirm actually executes it:
+docker compose exec backend node scripts/migrate-dimension-units.js \
+  --item-ids=<digit item id> --from=ft --to=yd --confirm
+```
+
+- `--item-ids` — Digit item ids to migrate (required, no default, no "all
+  items in the org" mode — scope is never guessed).
+- `--from` / `--to` — linear units (`ft`, `yd`, `m` today; see
+  `AREA_UNIT_TABLE` in `backend/src/features/cutting/digitOps.js` to add
+  more).
+- Refuses to run — reports the offending labels and writes nothing, even
+  with `--confirm` — if any in-scope label has a dimension state (only one
+  of Roll Length/Roll Width set) or a `Piece Type` it can't interpret,
+  rather than silently skipping it and leaving it half-migrated.
+- Never touches `quantityInStock` — that value is Digit's own, under
+  Digit's own UoM, and stays correct regardless of this migration; only the
+  `Roll Length`/`Roll Width` custom fields this app owns are in scope.
+- Only sees in-stock labels (same `minQuantityInStock` filter as the cutting
+  queue's material lookup) — a fully-consumed label with stale dimensions
+  left over isn't reachable this way.

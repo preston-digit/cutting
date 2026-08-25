@@ -10,7 +10,15 @@ import {
   getAvailableMaterial,
 } from "./api.js";
 import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
-import { formatArea, formatLength, formatDims, formatQty, linearUnitSymbol } from "./units.js";
+import { printPdfBase64 } from "./printPdf.js";
+import {
+  formatArea,
+  formatQty,
+  linearUnitSymbol,
+  formatLengthFeetInches,
+  formatDimsFeetInches,
+  combineFeetInches,
+} from "./units.js";
 
 const OPERATOR_STORAGE_KEY = "cutting.operatorName";
 // Mirrors backend/src/features/cutting/digitOps.js's looksLikeScancode/sanitizeScanValue —
@@ -29,7 +37,16 @@ const COMMIT_STEP_LABELS = {
   writeSourceDimensions: "Update source label's remaining dimensions",
   pickWorkingPiece: "Pick working piece into the manufacturing order",
   startWorkOrder: "Start work order",
+  printLabels: "Print label(s)",
 };
+
+// Print step fails differently from every inventory step above it: the cut
+// itself already fully succeeded by the time printing runs (see routes.js —
+// printing is last), so a failure here is never "something in Digit is now
+// wrong," it's "go print this again" — see repairMessage(). Working piece +
+// remnant are one combined print job (one PDF, one dialog) — see
+// routes.js's printLabels step — never two separate steps/dialogs.
+const PRINT_STEP_KEYS = new Set(["printLabels"]);
 
 function StatusPill({ status }) {
   if (status === "IN_PROGRESS") return <span className="pill pill--blue">In Progress</span>;
@@ -54,17 +71,84 @@ function CopyButton({ text }) {
   );
 }
 
+// Paired feet/inches entry — operators measure "13 foot 2", never decimal
+// feet. Each field keeps its own text state in the parent (see cutWidthFeet/
+// cutWidthInches etc. in CutScreen) so partial typing in one box never gets
+// clobbered by a round-trip through the derived decimal value.
+function FeetInchesFields({
+  label,
+  feet,
+  onFeetChange,
+  inches,
+  onInchesChange,
+  feetRef,
+  inchesRef,
+  onFeetEnter,
+  onInchesEnter,
+  autoFocus,
+}) {
+  return (
+    <div className="field" style={{ flex: 1 }}>
+      <label className="field-label">{label}</label>
+      <div style={{ display: "flex", gap: "var(--space-2)", alignItems: "center" }}>
+        <input
+          ref={feetRef}
+          className="input"
+          type="number"
+          min="0"
+          step="1"
+          placeholder="ft"
+          value={feet}
+          onChange={(e) => onFeetChange(e.target.value)}
+          onKeyDown={onFeetEnter}
+          autoFocus={autoFocus}
+          style={{ flex: 1 }}
+        />
+        <span className="muted">'</span>
+        <input
+          ref={inchesRef}
+          className="input"
+          type="number"
+          min="0"
+          max="11"
+          step="1"
+          placeholder="in"
+          value={inches}
+          onChange={(e) => onInchesChange(e.target.value)}
+          onKeyDown={onInchesEnter}
+          style={{ flex: 1 }}
+        />
+        <span className="muted">"</span>
+      </div>
+    </div>
+  );
+}
+
 function ChecklistIcon({ status }) {
   const symbol = { pending: "", running: "…", ok: "✓", error: "!", skipped: "–" }[status] || "";
   return <span className={`checklist-icon checklist-icon--${status}`}>{symbol}</span>;
 }
 
-// sufficient is true/false/null (null = no basis to judge — no required cut
-// could be resolved at all, see routes.js's resolveRequiredCut).
-function SufficiencyBadge({ sufficient }) {
+// sufficient is exactly one of three states (see scorePiece() in routes.js —
+// the single shared predicate; this badge never re-derives a verdict, only
+// renders the one already computed there):
+//   true  — verified sufficient (dimensional match against a known W×L target)
+//   false — verified insufficient (dimensional, known target)
+//   null  — cannot verify dimensionally: either this piece's own dimensions
+//           are unknown, or no width/length target resolved (only a BOM
+//           area figure, or nothing at all). This is deliberately NOT a
+//           green/muted verdict — an area-only match is not proof a piece
+//           can yield the right shape — and copy tells the operator what to
+//           do about it rather than just naming the unknown.
+function SufficiencyBadge({ sufficient, knownDims }) {
   if (sufficient === true) return <span className="pill pill--green">Sufficient</span>;
   if (sufficient === false) return <span className="pill pill--neutral">Insufficient</span>;
-  return <span className="pill pill--warning">Unknown</span>;
+  if (!knownDims) return <span className="pill pill--warning" title="This piece's own Roll Length/Width aren't set in Digit.">Dimensions unknown</span>;
+  return (
+    <span className="pill pill--warning" title="No target width/length to compare against — enter target dimensions above to verify.">
+      Cannot verify — check rack
+    </span>
+  );
 }
 
 // Describes what sufficiency is being judged against, so the ordering reads
@@ -74,7 +158,7 @@ function requiredCutLabel(required, areaSymbol) {
   if (!required) return null;
   if (required.width != null && required.length != null) {
     const suffix = required.source === "item_name" ? " (parsed from item name)" : required.source === "operator_entry" ? " (as entered)" : "";
-    return `Comparing against ${formatDims(required.width, required.length, areaSymbol)} — ${formatArea(required.area, areaSymbol)} per rug${suffix}`;
+    return `Comparing against ${formatDimsFeetInches(required.width, required.length, areaSymbol)} — ${formatArea(required.area, areaSymbol)} per rug${suffix}`;
   }
   if (required.area != null) {
     return `Comparing against ${formatArea(required.area, areaSymbol)} per rug (dimensions not available — enter cut width/length above for an exact fit check)`;
@@ -97,12 +181,24 @@ export default function CutScreen({ nav, workOrderId }) {
   const [areaMismatchAck, setAreaMismatchAck] = useState(false);
   const [scannerOpen, setScannerOpen] = useState(false);
   const scanInputRef = useRef(null);
-  const cutLengthInputRef = useRef(null);
+  const cutWidthInchesRef = useRef(null);
+  const cutLengthFeetRef = useRef(null);
+  const cutLengthInchesRef = useRef(null);
   const commitButtonRef = useRef(null);
 
   // --- Cut entry state -------------------------------------------------------
-  const [cutWidth, setCutWidth] = useState("");
-  const [cutLength, setCutLength] = useState("");
+  // Operators measure in feet and inches, not decimal feet — separate
+  // feet/inches text fields are the source of truth; cutWidth/cutLength
+  // below are the derived decimal-feet numbers used for all math and sent
+  // to the backend (see units.js's combineFeetInches — decimal feet stays
+  // the sole internal representation, per SCHEMA_NOTES.md's canonical
+  // unit-basis rule).
+  const [cutWidthFeet, setCutWidthFeet] = useState("");
+  const [cutWidthInches, setCutWidthInches] = useState("");
+  const [cutLengthFeet, setCutLengthFeet] = useState("");
+  const [cutLengthInches, setCutLengthInches] = useState("");
+  const cutWidth = useMemo(() => combineFeetInches(cutWidthFeet, cutWidthInches), [cutWidthFeet, cutWidthInches]);
+  const cutLength = useMemo(() => combineFeetInches(cutLengthFeet, cutLengthInches), [cutLengthFeet, cutLengthInches]);
   const [remnantBin, setRemnantBin] = useState(null); // { id, name }
   const [binSearchResults, setBinSearchResults] = useState([]);
   const [binsError, setBinsError] = useState(null);
@@ -168,10 +264,8 @@ export default function CutScreen({ nav, workOrderId }) {
   // are known, but the list is useful even before that).
   useEffect(() => {
     let cancelled = false;
-    const w = Number(cutWidth);
-    const l = Number(cutLength);
     const timer = setTimeout(() => {
-      getAvailableMaterial(workOrderId, w > 0 ? w : undefined, l > 0 ? l : undefined)
+      getAvailableMaterial(workOrderId, cutWidth > 0 ? cutWidth : undefined, cutLength > 0 ? cutLength : undefined)
         .then((list) => !cancelled && setAvailableMaterial(list))
         .catch((err) => !cancelled && setAvailableMaterialError(err.message));
     }, 300);
@@ -253,8 +347,15 @@ export default function CutScreen({ nav, workOrderId }) {
     return !wo.bomComponents.some((c) => c.itemId === source.itemId);
   }, [source, wo]);
 
+  // A probable unit mismatch (dimensions and quantityInStock look like
+  // they're in two different units, not just off from bad data — see
+  // isUnitMismatchRatio() in digitOps.js) has no override path: it needs a
+  // fix in Digit, not an operator ack, so it's excluded unconditionally.
   const readyToEnterCut =
-    source && (!bomMismatch || bomOverride) && (!source.areaMismatch?.outOfSync || areaMismatchAck);
+    source &&
+    !source.areaMismatch?.probableUnitMismatch &&
+    (!bomMismatch || bomOverride) &&
+    (!source.areaMismatch?.outOfSync || areaMismatchAck);
 
   // --- Cut math (mirrors backend/src/features/cutting/routes.js) ------------
   // Physical cut order — confirmed 8/24/2026 with the customer (see
@@ -263,8 +364,8 @@ export default function CutScreen({ nav, workOrderId }) {
   // that piece second, so the side remnant is only cutLength long and the
   // roll always loses the full cutLength regardless of cutWidth.
   const cut = useMemo(() => {
-    const w = Number(cutWidth);
-    const l = Number(cutLength);
+    const w = cutWidth;
+    const l = cutLength;
     if (!source || !w || !l || w <= 0 || l <= 0) return null;
     const sourceWidth = source.rollWidth;
     const sourceLength = source.rollLength;
@@ -297,8 +398,10 @@ export default function CutScreen({ nav, workOrderId }) {
   function resetForNextPiece() {
     setSource(null);
     setSearchResults(null);
-    setCutWidth("");
-    setCutLength("");
+    setCutWidthFeet("");
+    setCutWidthInches("");
+    setCutLengthFeet("");
+    setCutLengthInches("");
     setSteps([]);
     setCommitSummary(null);
     setCommitError(null);
@@ -316,7 +419,7 @@ export default function CutScreen({ nav, workOrderId }) {
     setCommitError(null);
     const plannedKeys = ["splitWorkingPiece", "writeWorkingPieceDimensions"];
     if (cut.hasSideRemnant) plannedKeys.push("splitRemnant", "writeRemnantDimensions");
-    plannedKeys.push("writeSourceDimensions", "pickWorkingPiece", "startWorkOrder");
+    plannedKeys.push("writeSourceDimensions", "pickWorkingPiece", "startWorkOrder", "printLabels");
     setSteps(plannedKeys.map((key) => ({ key, label: COMMIT_STEP_LABELS[key], status: "pending" })));
 
     let summary = null;
@@ -339,6 +442,13 @@ export default function CutScreen({ nav, workOrderId }) {
           }
           if (event.key === "fatal") {
             setCommitError(event.error);
+            return;
+          }
+          if (event.key === "printPdf") {
+            // Streamed separately from the checklist steps (see routes.js —
+            // never persisted to cut_events); open the real PDF and trigger
+            // the browser's native print dialog once, covering both tags.
+            printPdfBase64(event.pdfBase64, { onError: (err) => setCommitError(`Rendered but couldn't open the print dialog: ${err.message}`) });
             return;
           }
           setSteps((prev) => prev.map((s) => (s.key === event.key ? { ...s, ...event } : s)));
@@ -400,6 +510,13 @@ export default function CutScreen({ nav, workOrderId }) {
   // if the split succeeded but the write failed, say exactly what's now
   // wrong in Digit and what it should have been, so it can be fixed by hand.
   function repairMessage(step) {
+    if (PRINT_STEP_KEYS.has(step.key)) {
+      // Deliberately NOT "needs manual repair in Digit" — the cut itself
+      // (every inventory operation) already succeeded; this is purely a
+      // printing problem. Reprint from the History screen once it's
+      // resolved — nothing here needs fixing by hand in Digit.
+      return `${step.error} The cut itself already completed — nothing in Digit needs repair. Reprint this label from the History screen once resolved.`;
+    }
     const splitStepKey =
       step.key === "writeWorkingPieceDimensions" ? "splitWorkingPiece" : step.key === "writeRemnantDimensions" ? "splitRemnant" : null;
     if (splitStepKey) {
@@ -503,6 +620,39 @@ export default function CutScreen({ nav, workOrderId }) {
             </div>
           )}
 
+          {/* Required-cut resolution is operator entry -> item-name "WxL" parse ->
+              BOM area-only fallback -> nothing. The first two give a real W×L
+              target; the last two can't judge sufficiency dimensionally at all
+              (see scorePiece() in routes.js). Operator entry is already first
+              in that chain, so surfacing it here — before a source is even
+              picked — lets the operator resolve every piece on screen into a
+              real verdict without a reload (the debounced effect above already
+              refetches available-material on every keystroke). */}
+          {!committed && availableMaterial &&
+            (availableMaterial.requiredCut?.source === "bom_quantity_per_unit" ||
+              availableMaterial.requiredCut?.source === "none") && (
+              <div className="warning-box" style={{ marginBottom: "var(--space-3)" }}>
+                Can't determine this item's required cut dimensions automatically — enter the target
+                width and length below to check which pieces on hand can actually be cut to that shape.
+                <div style={{ display: "flex", gap: "var(--space-3)", marginTop: "var(--space-2)" }}>
+                  <FeetInchesFields
+                    label="Target width"
+                    feet={cutWidthFeet}
+                    onFeetChange={setCutWidthFeet}
+                    inches={cutWidthInches}
+                    onInchesChange={setCutWidthInches}
+                  />
+                  <FeetInchesFields
+                    label="Target length"
+                    feet={cutLengthFeet}
+                    onFeetChange={setCutLengthFeet}
+                    inches={cutLengthInches}
+                    onInchesChange={setCutLengthInches}
+                  />
+                </div>
+              </div>
+            )}
+
           {!committed && availableMaterial && availableMaterial.pieces?.length > 0 && (
             <div style={{ marginBottom: "var(--space-4)" }}>
               <div className="section-label" style={{ marginBottom: "var(--space-2)" }}>
@@ -521,8 +671,15 @@ export default function CutScreen({ nav, workOrderId }) {
                   <div className="col">Owner</div>
                   <div className="col">Bin</div>
                 </div>
-                {availableMaterial.pieces.map((p) => (
-                  <div key={p.id} className="row" onClick={() => applySource(p)}>
+                {availableMaterial.pieces.map((p) => {
+                  const blocked = p.areaMismatch?.probableUnitMismatch;
+                  return (
+                  <div
+                    key={p.id}
+                    className="row"
+                    onClick={blocked ? undefined : () => applySource(p)}
+                    style={blocked ? { opacity: 0.55, cursor: "not-allowed" } : undefined}
+                  >
                     <div className="col">
                       Label #{p.labelNumber} <span className="muted mono">({formatArea(p.quantityInStock, p.areaUom?.symbol)})</span>
                     </div>
@@ -532,19 +689,23 @@ export default function CutScreen({ nav, workOrderId }) {
                       </span>
                     </div>
                     <div className="col">
-                      <SufficiencyBadge sufficient={p.sufficient} />
+                      <SufficiencyBadge sufficient={p.sufficient} knownDims={p.knownDims} />
                     </div>
                     <div className="col mono">
                       {p.knownDims ? (
                         <>
-                          {formatDims(p.rollWidth, p.rollLength, p.areaUom?.symbol)}
+                          {formatDimsFeetInches(p.rollWidth, p.rollLength, p.areaUom?.symbol)}
                           {p.areaMismatch?.outOfSync && (
                             <span
                               className="warning-text"
                               style={{ marginLeft: "var(--space-1)", cursor: "help" }}
-                              title={`Out of sync: quantity in stock is ${formatArea(p.areaMismatch.quantityInStock, p.areaUom?.symbol)}, but Roll Length × Roll Width implies ${formatArea(p.areaMismatch.impliedArea, p.areaUom?.symbol)}. Numbers shown are what's stored in Digit — confirm at the rack.`}
+                              title={
+                                blocked
+                                  ? `Probable unit mismatch: quantity in stock is ${formatArea(p.areaMismatch.quantityInStock, p.areaUom?.symbol)} but dimensions imply ${formatArea(p.areaMismatch.impliedArea, p.areaUom?.symbol)} — a ratio consistent with a different unit, not bad data. Not selectable here; check the rack and fix in Digit.`
+                                  : `Out of sync: quantity in stock is ${formatArea(p.areaMismatch.quantityInStock, p.areaUom?.symbol)}, but Roll Length × Roll Width implies ${formatArea(p.areaMismatch.impliedArea, p.areaUom?.symbol)}. Numbers shown are what's stored in Digit — confirm at the rack.`
+                              }
                             >
-                              ⚠
+                              {blocked ? "⛔" : "⚠"}
                             </span>
                           )}
                         </>
@@ -555,7 +716,8 @@ export default function CutScreen({ nav, workOrderId }) {
                     <div className="col">{p.owner ?? "—"}</div>
                     <div className="col">{p.binName}</div>
                   </div>
-                ))}
+                  );
+                })}
               </div>
             </div>
           )}
@@ -565,15 +727,17 @@ export default function CutScreen({ nav, workOrderId }) {
             </div>
           )}
 
-          <div className="field">
-            <label className="field-label">Operator</label>
-            <input
-              className="input"
-              placeholder="Your name"
-              value={operatorName}
-              onChange={(e) => setOperatorName(e.target.value)}
-              style={{ maxWidth: 240 }}
-            />
+          <div style={{ display: "flex", gap: "var(--space-3)" }}>
+            <div className="field">
+              <label className="field-label">Operator</label>
+              <input
+                className="input"
+                placeholder="Your name"
+                value={operatorName}
+                onChange={(e) => setOperatorName(e.target.value)}
+                style={{ maxWidth: 240 }}
+              />
+            </div>
           </div>
 
           {!committed && (
@@ -646,11 +810,11 @@ export default function CutScreen({ nav, workOrderId }) {
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Roll Length</span>
-                      <span className="kv-value mono">{formatLength(source.rollLength, source.areaUom?.symbol)}</span>
+                      <span className="kv-value mono">{formatLengthFeetInches(source.rollLength, source.areaUom?.symbol)}</span>
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Roll Width</span>
-                      <span className="kv-value mono">{formatLength(source.rollWidth, source.areaUom?.symbol)}</span>
+                      <span className="kv-value mono">{formatLengthFeetInches(source.rollWidth, source.areaUom?.symbol)}</span>
                     </div>
                     <div className="kv-row">
                       <span className="kv-label">Owner</span>
@@ -673,7 +837,17 @@ export default function CutScreen({ nav, workOrderId }) {
                     </div>
                   )}
 
-                  {source.areaMismatch?.outOfSync && (
+                  {source.areaMismatch?.probableUnitMismatch ? (
+                    <div className="checklist-error-box" style={{ marginTop: "var(--space-3)" }}>
+                      This label's dimensions appear to be recorded in a different unit than this item's
+                      stock UoM ({source.areaUom?.symbol}) — quantity in stock is{" "}
+                      <span className="mono">{formatArea(source.areaMismatch.quantityInStock, source.areaUom?.symbol)}</span>, but Roll
+                      Length × Roll Width implies{" "}
+                      <span className="mono">{formatArea(source.areaMismatch.impliedArea, source.areaUom?.symbol)}</span> — a ratio
+                      consistent with a unit mix-up, not just a measurement gap. This piece can't be cut from
+                      here; check the rack and fix the dimensions in Digit first.
+                    </div>
+                  ) : source.areaMismatch?.outOfSync && (
                     <div className="warning-box" style={{ marginTop: "var(--space-3)" }}>
                       This label's dimensions are out of sync with its area — likely split outside this
                       module. Quantity in stock is <span className="mono">{formatArea(source.areaMismatch.quantityInStock, source.areaUom?.symbol)}</span>,
@@ -691,37 +865,33 @@ export default function CutScreen({ nav, workOrderId }) {
                 <>
                   <h2 className="section-label">Cut entry</h2>
                   <div style={{ display: "flex", gap: "var(--space-3)", marginBottom: "var(--space-3)" }}>
-                    <div className="field" style={{ flex: 1 }}>
-                      <label className="field-label">Cut Width{source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}</label>
-                      <input
-                        className="input"
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={cutWidth}
-                        onChange={(e) => setCutWidth(e.target.value)}
-                        onKeyDown={focusOnEnter(cutLengthInputRef)}
-                        autoFocus
-                      />
-                    </div>
-                    <div className="field" style={{ flex: 1 }}>
-                      <label className="field-label">Cut Length{source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}</label>
-                      <input
-                        ref={cutLengthInputRef}
-                        className="input"
-                        type="number"
-                        min="0"
-                        step="0.1"
-                        value={cutLength}
-                        onChange={(e) => setCutLength(e.target.value)}
-                        onKeyDown={focusOnEnter(commitButtonRef)}
-                      />
-                    </div>
+                    <FeetInchesFields
+                      label={`Cut Width${source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}`}
+                      feet={cutWidthFeet}
+                      onFeetChange={setCutWidthFeet}
+                      inches={cutWidthInches}
+                      onInchesChange={setCutWidthInches}
+                      inchesRef={cutWidthInchesRef}
+                      onFeetEnter={focusOnEnter(cutWidthInchesRef)}
+                      onInchesEnter={focusOnEnter(cutLengthFeetRef)}
+                      autoFocus
+                    />
+                    <FeetInchesFields
+                      label={`Cut Length${source.areaUom?.symbol ? ` (${linearUnitSymbol(source.areaUom.symbol)})` : ""}`}
+                      feet={cutLengthFeet}
+                      onFeetChange={setCutLengthFeet}
+                      inches={cutLengthInches}
+                      onInchesChange={setCutLengthInches}
+                      feetRef={cutLengthFeetRef}
+                      inchesRef={cutLengthInchesRef}
+                      onFeetEnter={focusOnEnter(cutLengthInchesRef)}
+                      onInchesEnter={focusOnEnter(commitButtonRef)}
+                    />
                   </div>
 
                   {cut && (cut.exceedsSource || cut.exceedsLength) && (
                     <div className="checklist-error-box" style={{ marginBottom: "var(--space-3)" }}>
-                      Cut dimensions exceed the source roll ({formatDims(source.rollWidth, source.rollLength, source.areaUom?.symbol)}).
+                      Cut dimensions exceed the source roll ({formatDimsFeetInches(source.rollWidth, source.rollLength, source.areaUom?.symbol)}).
                     </div>
                   )}
 
@@ -732,12 +902,12 @@ export default function CutScreen({ nav, workOrderId }) {
                         Consume <span className="mono">{formatArea(cut.cutArea, source.areaUom?.symbol)}</span> from Label #{source.labelNumber}.
                       </div>
                       <div style={{ marginBottom: "var(--space-2)" }}>
-                        Create piece <span className="mono">{formatDims(cut.cutWidth, cut.cutLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.cutArea, source.areaUom?.symbol)}</span>).
+                        Create piece <span className="mono">{formatDimsFeetInches(cut.cutWidth, cut.cutLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.cutArea, source.areaUom?.symbol)}</span>).
                       </div>
                       {cut.hasSideRemnant ? (
                         <div style={{ display: "flex", alignItems: "center", gap: "var(--space-2)", marginBottom: "var(--space-2)" }}>
                           <span>
-                            Create remnant <span className="mono">{formatDims(cut.remnantWidth, cut.remnantLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.remnantArea, source.areaUom?.symbol)}</span>) →
+                            Create remnant <span className="mono">{formatDimsFeetInches(cut.remnantWidth, cut.remnantLength, source.areaUom?.symbol)}</span> (<span className="mono">{formatArea(cut.remnantArea, source.areaUom?.symbol)}</span>) →
                           </span>
                           <select
                             className="select"
@@ -756,7 +926,7 @@ export default function CutScreen({ nav, workOrderId }) {
                       ) : (
                         <div className="muted" style={{ marginBottom: "var(--space-2)" }}>
                           Full-width crosscut — no side remnant. Source label continues at{" "}
-                          <span className="mono">{formatDims(cut.sourceWidthAfter, cut.sourceLengthAfter, source.areaUom?.symbol)}</span>.
+                          <span className="mono">{formatDimsFeetInches(cut.sourceWidthAfter, cut.sourceLengthAfter, source.areaUom?.symbol)}</span>.
                         </div>
                       )}
                       {binsError && (

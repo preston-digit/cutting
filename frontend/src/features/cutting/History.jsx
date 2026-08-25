@@ -1,10 +1,53 @@
 import { useEffect, useState } from "react";
-import { getHistory } from "./api.js";
+import { getHistory, reprintLabel } from "./api.js";
 import { formatArea, formatDims } from "./units.js";
+import { printPdfBase64 } from "./printPdf.js";
 
 function StatusPill({ status }) {
   if (status === "completed") return <span className="pill pill--green">Completed</span>;
   return <span className="pill pill--neutral">Partial failure</span>;
+}
+
+// Reprint is deliberately available regardless of whether the original
+// print step failed — a physical label can be lost, smudged, or misprinted
+// long after a clean commit, and there's nothing Digit-side to "fix" either
+// way (see CutScreen.jsx's repairMessage). null print status just means
+// "not attempted" (no side remnant, or a pre-print-feature row).
+function ReprintButton({ cutEventId, piece, printStatus, printError }) {
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState(null);
+
+  async function handleReprint() {
+    setBusy(true);
+    setResult(null);
+    try {
+      const res = await reprintLabel(cutEventId, piece);
+      setResult({ ok: true, detail: res.detail });
+      if (res.pdfBase64) {
+        printPdfBase64(res.pdfBase64, {
+          onError: (err) => setResult({ ok: false, detail: `Rendered but couldn't open the print dialog: ${err.message}` }),
+        });
+      }
+    } catch (err) {
+      setResult({ ok: false, detail: err.message });
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <div>
+      {printStatus === "failed" && <div className="muted" style={{ fontSize: "var(--fs-sm)" }}>Print failed: {printError}</div>}
+      <button className="btn btn--secondary" style={{ padding: "2px 8px", fontSize: "var(--fs-sm)" }} onClick={handleReprint} disabled={busy}>
+        {busy ? "Printing…" : "Reprint"}
+      </button>
+      {result && (
+        <div className={result.ok ? "muted" : "checklist-error-box"} style={{ fontSize: "var(--fs-sm)", marginTop: 2 }}>
+          {result.detail}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function History({ nav }) {
@@ -70,8 +113,28 @@ export default function History({ nav }) {
                   <div className="muted">remnant {formatDims(e.remnant_width, e.remnant_length, e.area_uom_symbol)} ({formatArea(e.remnant_area, e.area_uom_symbol)})</div>
                 )}
               </div>
-              <div className="col">{e.working_piece_scancode || <span className="muted">—</span>}</div>
-              <div className="col">{e.remnant_scancode || <span className="muted">—</span>}</div>
+              <div className="col">
+                {e.working_piece_scancode || <span className="muted">—</span>}
+                {e.working_piece_inventory_id && (
+                  <ReprintButton
+                    cutEventId={e.id}
+                    piece="workingPiece"
+                    printStatus={e.working_piece_print_status}
+                    printError={e.working_piece_print_error}
+                  />
+                )}
+              </div>
+              <div className="col">
+                {e.remnant_scancode || <span className="muted">—</span>}
+                {e.remnant_inventory_id && (
+                  <ReprintButton
+                    cutEventId={e.id}
+                    piece="remnant"
+                    printStatus={e.remnant_print_status}
+                    printError={e.remnant_print_error}
+                  />
+                )}
+              </div>
               <div className="col">
                 <StatusPill status={e.status} />
                 {e.failed_step && <div className="muted">failed at {e.failed_step}</div>}

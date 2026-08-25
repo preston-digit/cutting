@@ -39,3 +39,45 @@ export function formatQty(value, symbol) {
   if (value == null) return "—";
   return symbol ? `${value} ${symbol}` : `${value}`;
 }
+
+// Operators measure rolls in feet and inches, not decimal feet — a tape
+// reads "13 foot 2", never "13.1667". Decimal feet stays the sole internal
+// representation (mirrors backend/src/features/cutting/dimensions.js) —
+// these are display/input-only helpers, nothing here is ever written back
+// to a Digit custom field as a feet-inches string.
+
+/** Decimal feet -> "13'-2\"" for display. Rounds to the nearest whole inch. */
+export function formatFeetInches(decimalFeet) {
+  if (decimalFeet == null || !Number.isFinite(decimalFeet)) return null;
+  const totalInches = Math.round(decimalFeet * 12);
+  const sign = totalInches < 0 ? "-" : "";
+  const abs = Math.abs(totalInches);
+  const feet = Math.floor(abs / 12);
+  const inches = abs % 12;
+  return `${sign}${feet}'-${inches}"`;
+}
+
+/** feet + inches (separate operator inputs) -> decimal feet, or null if neither is a usable number. */
+export function combineFeetInches(feet, inches) {
+  const f = feet === "" || feet == null ? 0 : Number(feet);
+  const i = inches === "" || inches == null ? 0 : Number(inches);
+  if (!Number.isFinite(f) || !Number.isFinite(i)) return null;
+  if (feet === "" && inches === "") return null;
+  return f + i / 12;
+}
+
+/** value + linear unit, feet-inches notation when the linear unit is "ft", decimal otherwise. */
+export function formatLengthFeetInches(value, areaSymbol) {
+  if (value == null) return "—";
+  const lin = linearUnitSymbol(areaSymbol);
+  if (lin === "ft") return formatFeetInches(value);
+  return lin ? `${value} ${lin}` : `${value}`;
+}
+
+/** width × length, feet-inches notation when the linear unit is "ft", decimal otherwise. */
+export function formatDimsFeetInches(width, length, areaSymbol) {
+  if (width == null || length == null) return "—";
+  const lin = linearUnitSymbol(areaSymbol);
+  if (lin === "ft") return `${formatFeetInches(width)} × ${formatFeetInches(length)}`;
+  return lin ? `${width} × ${length} ${lin}` : `${width} × ${length}`;
+}

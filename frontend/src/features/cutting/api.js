@@ -32,6 +32,24 @@ export const completeWorkOrder = (workOrderId, completedQuantity) =>
 
 export const getHistory = (limit = 50) => apiRequest(`/api/cutting/history?limit=${limit}`);
 
+// Print stations — printer address stays server-side; this only ever
+// returns { id, name, hasPrinter }.
+export const getStations = () => apiRequest("/api/cutting/stations");
+
+export const createStation = (name, printerAddress) =>
+  apiRequest("/api/cutting/stations", {
+    method: "POST",
+    body: JSON.stringify({ name, printerAddress }),
+  });
+
+// No stationId — reprint always goes through BrowserPrintSink (see
+// backend/src/features/cutting/print/sink.js's resolveSinkForStation).
+export const reprintLabel = (cutEventId, piece) =>
+  apiRequest(`/api/cutting/history/${cutEventId}/reprint`, {
+    method: "POST",
+    body: JSON.stringify({ piece }),
+  });
+
 export const getAvailableMaterial = (workOrderId, cutWidth, cutLength) => {
   const params = new URLSearchParams();
   if (cutWidth) params.set("cutWidth", cutWidth);

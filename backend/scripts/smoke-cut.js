@@ -13,11 +13,25 @@
 // Optional:
 //   SMOKE_CUT_WIDTH            (default 5)
 //   SMOKE_CUT_LENGTH           (default 5)
+//   SMOKE_EXPECTED_LINEAR_UNIT — the linear unit SMOKE_CUT_WIDTH/LENGTH are
+//                                expressed in (default "ft"). Checked
+//                                against the source item's own live
+//                                defaultStockUom before running a real cut —
+//                                see SCHEMA_NOTES.md's canonical unit-basis
+//                                rule. A mismatch aborts before mutating
+//                                anything, since it means this run's
+//                                SMOKE_CUT_WIDTH/LENGTH would be silently
+//                                interpreted in the wrong unit.
 //   SMOKE_REMNANT_BIN_ID       — required only if the cut produces a side
 //                                remnant (cutWidth < source's Roll Width)
 //   BACKEND_URL                (default http://localhost:4001)
 import { pool } from "../src/core/db.js";
-import { getInventoryById, readInventoryCustomFields, getWorkOrderDetail } from "../src/features/cutting/digitOps.js";
+import {
+  getInventoryById,
+  readInventoryCustomFields,
+  getWorkOrderDetail,
+  deriveLinearUnitSymbol,
+} from "../src/features/cutting/digitOps.js";
 import { digitRequest } from "../src/core/digit.js";
 
 const PICKED_JOB_ITEMS_QUERY = `
@@ -41,6 +55,7 @@ const WORK_ORDER_ID = process.env.SMOKE_WORK_ORDER_ID;
 const SOURCE_INVENTORY_ID = process.env.SMOKE_SOURCE_INVENTORY_ID;
 const CUT_WIDTH = Number(process.env.SMOKE_CUT_WIDTH || 5);
 const CUT_LENGTH = Number(process.env.SMOKE_CUT_LENGTH || 5);
+const EXPECTED_LINEAR_UNIT = process.env.SMOKE_EXPECTED_LINEAR_UNIT || "ft";
 const REMNANT_BIN_ID = process.env.SMOKE_REMNANT_BIN_ID || null;
 
 const results = [];
@@ -75,6 +90,22 @@ async function main() {
   const sourceQtyBefore = sourceBefore.quantityInStock;
   const sourceWidth = sourceDimsBefore.rollWidth;
   const hasSideRemnant = sourceWidth != null && CUT_WIDTH < sourceWidth;
+
+  // Assert the UNIT, not just the arithmetic — a UoM change on this item
+  // (e.g. an org move from ft² to yd²) must trip this test immediately,
+  // before it ever runs a real cut with dimensions in the wrong unit. See
+  // SCHEMA_NOTES.md's canonical unit-basis rule.
+  const itemAreaSymbol = sourceBefore.item?.defaultStockUom?.symbol;
+  const itemLinearUnit = deriveLinearUnitSymbol(itemAreaSymbol);
+  if (itemLinearUnit !== EXPECTED_LINEAR_UNIT) {
+    console.error(
+      `Item's stock UoM ("${itemAreaSymbol}" -> linear unit "${itemLinearUnit}") does not match ` +
+        `SMOKE_EXPECTED_LINEAR_UNIT="${EXPECTED_LINEAR_UNIT}" — SMOKE_CUT_WIDTH/SMOKE_CUT_LENGTH would be ` +
+        `interpreted in the wrong unit. Aborting before running a real cut.`
+    );
+    process.exit(1);
+  }
+  check("item's stock UoM matches the linear unit SMOKE_CUT_WIDTH/LENGTH assume", true, `defaultStockUom=${itemAreaSymbol} -> linear unit=${itemLinearUnit}`);
 
   if (hasSideRemnant && !REMNANT_BIN_ID) {
     console.error(
@@ -164,7 +195,7 @@ async function main() {
     workingPieceDims && approxEqual(workingPieceDims.rollLength, CUT_LENGTH) && approxEqual(workingPieceDims.rollWidth, CUT_WIDTH),
     workingPieceDims ? `L=${workingPieceDims.rollLength} W=${workingPieceDims.rollWidth}` : undefined
   );
-  check("working piece Piece Type == Cut Piece", workingPieceDims?.pieceType?.includes("Cut Piece"));
+  check("working piece Piece Type == Cut Rug", workingPieceDims?.pieceType?.includes("Cut Rug"));
   check("working piece Parent Roll == source scancode", workingPieceDims?.parentRoll === sourceBefore.scanCodeSerialNumber);
 
   if (hasSideRemnant) {

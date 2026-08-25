@@ -25,13 +25,108 @@ import {
   looksLikeScancode,
   itemUom,
   deriveLinearUnitSymbol,
+  requireLinearUnit,
+  isUnitMismatchRatio,
   isRealStorageBin,
 } from "./digitOps.js";
+import { renderLabel } from "./labelRenderer.js";
+import { getLabelTemplateForItem } from "./labelTemplate.js";
+import { canvasToArtifact, renderLabelPdf } from "./print/artifact.js";
+import { resolveSinkForStation } from "./print/sink.js";
 
 const router = Router();
 
 const REMNANT_BIN_NAME = process.env.REMNANT_BIN_NAME || "Remnant Storage";
 const AREA_MISMATCH_TOLERANCE = 0.01; // 1%, see SCHEMA_NOTES.md
+const LABEL_NAME = "Carpet-Roll-Tag";
+// Defaulted OFF on purpose: a cut that can't produce a tag must never
+// complete silently (a piece can't reach the rack untagged). Only orgs that
+// genuinely don't print labels should ever set this to "true".
+const ALLOW_PRINTLESS_COMMITS = process.env.ALLOW_PRINTLESS_COMMITS === "true";
+// The Piece Type this module writes to the label it creates at the cutting
+// table (the working piece) — deliberately NOT "Cut Piece" or "Finished
+// Rug". Digit generates its own separate serialized finished-good label
+// when the MO's last work order step completes; the label created here is
+// that job's INPUT, consumed by production, not the finished output — so
+// it must not read as finished. "Cut Rug" describes what it physically is
+// at creation and stays accurate all the way through production. Verified
+// live against Digit's Piece Type option list before this was set (see
+// SCHEMA_NOTES.md) — must match one of that field's real option values
+// verbatim, checked by getPieceTypeOptionId() (digitOps.js), which throws
+// rather than writing an unrecognized value.
+const WORKING_PIECE_TYPE = "Cut Rug";
+
+// Which Piece Type values are eligible source stock for a new cut. This is
+// an ALLOWLIST, not a blocklist: Digit's Piece Type option list can grow
+// over time (see SCHEMA_NOTES.md's live option list), and the safe default
+// for a value not on this list — including one added later that this app
+// doesn't know about yet — is to exclude it, never to offer it. A piece with
+// no Piece Type set at all is excluded the same way (isAllowedSourcePieceType
+// treats null/undefined as not-allowed), never treated as implicitly fine.
+// "Cut Rug" (this module's own WORKING_PIECE_TYPE) and "Finished Rug" are
+// deliberately excluded — both are already split/picked into a job and must
+// never be offered as raw material for a different cut.
+const SOURCE_PIECE_TYPE_ALLOWLIST = new Set(["Mill Roll", "Remnant", "Cut Piece"]);
+
+function isAllowedSourcePieceType(pieceType) {
+  return !!pieceType && SOURCE_PIECE_TYPE_ALLOWLIST.has(pieceType);
+}
+
+// --- Print stations ----------------------------------------------------------
+// Local-only concept (see db/migrations/0005_print_stations.sql) — printer
+// address never leaves the server. GET /stations only ever returns
+// name + has_printer.
+//
+// Nothing in the commit or reprint routes below calls getStationById or
+// passes a stationId anymore — the only working print path is
+// BrowserPrintSink (see resolveSinkForStation, print/sink.js), and the
+// frontend has no station picker. This table, these two routes, and this
+// helper are kept in place deliberately (not deleted) so a real network
+// printer can be wired up later — reintroduce a stationId param on
+// commit/reprint and call getStationById() again — without rebuilding this
+// piece from scratch.
+async function getStationById(stationId) {
+  if (!stationId) return null;
+  const db = assertDb();
+  const { rows } = await db.query(
+    `SELECT id, name, printer_address AS "printerAddress" FROM print_stations WHERE id = $1`,
+    [stationId]
+  );
+  return rows[0] || null;
+}
+
+router.get("/stations", async (_req, res, next) => {
+  try {
+    const db = assertDb();
+    const { rows } = await db.query(
+      `SELECT id, name, (printer_address IS NOT NULL) AS "hasPrinter" FROM print_stations ORDER BY name`
+    );
+    res.json(rows);
+  } catch (err) {
+    next(err);
+  }
+});
+
+// POST /stations — registers a station once (name always; printerAddress
+// optional — a station with no printer configured still lets an operator
+// select it, but every print through it falls back to ArtifactSink
+// (rendered, not actually dispatched) until an address is set.
+router.post("/stations", async (req, res, next) => {
+  try {
+    const { name, printerAddress } = req.body || {};
+    if (!name) return res.status(400).json({ error: "name is required" });
+    const db = assertDb();
+    const { rows } = await db.query(
+      `INSERT INTO print_stations (name, printer_address) VALUES ($1, $2)
+       ON CONFLICT (name) DO UPDATE SET printer_address = EXCLUDED.printer_address
+       RETURNING id, name, (printer_address IS NOT NULL) AS "hasPrinter"`,
+      [name, printerAddress || null]
+    );
+    res.json(rows[0]);
+  } catch (err) {
+    next(err);
+  }
+});
 
 function withParsedDimensions(inventory) {
   const dims = readInventoryCustomFields(inventory);
@@ -41,8 +136,16 @@ function withParsedDimensions(inventory) {
     const impliedArea = dims.rollLength * dims.rollWidth;
     const diff = Math.abs(impliedArea - area);
     const pctOff = impliedArea === 0 ? (area === 0 ? 0 : 1) : diff / impliedArea;
+    const outOfSync = pctOff > AREA_MISMATCH_TOLERANCE;
+    // Distinguish "these look like they were measured in a different unit
+    // than quantityInStock's UoM" (probableUnitMismatch — not selectable,
+    // needs a Digit-side fix) from a generic data-entry gap like label #9's
+    // 1,000 ft² of pre-existing dummy-data drift (stays selectable with an
+    // ack). See isUnitMismatchRatio() in digitOps.js / SCHEMA_NOTES.md.
+    const probableUnitMismatch = outOfSync && isUnitMismatchRatio(area, impliedArea);
     areaMismatch = {
-      outOfSync: pctOff > AREA_MISMATCH_TOLERANCE,
+      outOfSync,
+      probableUnitMismatch,
       quantityInStock: area,
       impliedArea,
       pctOff,
@@ -170,29 +273,39 @@ function resolveRequiredCut({ cutWidth, cutLength, itemName, quantityPerUnit }) 
 // strip is 100 ft² but can't make a 5 × 8 rug. Checked both ways round
 // (width/length aren't a meaningful axis label on a roll) so a piece
 // doesn't fail just because its long side happens to map to "width."
-// null/out-of-sync dimensions are NOT "unknown" here — this only tiers on
-// whether Roll Length/Width are populated at all (see withParsedDimensions);
-// an area-mismatched piece still has real numbers to judge sufficiency by,
-// it's just flagged separately for the operator to double check.
+//
+// sufficient is exactly one of three states — never a boolean derived from
+// area alone:
+//   true  — verified sufficient: both the piece's dims AND a required
+//           width/length are known, and the piece can yield that shape.
+//   false — verified insufficient: same as above, but it can't.
+//   null  — cannot verify dimensionally: either the piece's own dims are
+//           unknown, or no width/length target resolved (only a BOM
+//           quantityPerUnit area figure, or nothing at all — see
+//           resolveRequiredCut's "bom_quantity_per_unit"/"none" sources).
+//           An area-only match is NOT a sufficiency verdict — a 100×1 ft
+//           sliver can satisfy an area target while being physically
+//           useless for the actual shape needed.
 function scorePiece(p, required) {
   const knownDims = p.rollWidth != null && p.rollLength != null;
   const area = knownDims ? p.rollWidth * p.rollLength : null;
-  let sufficient = null; // null = no basis to judge (no required cut resolved at all)
+  const hasDimensionalTarget = required.width != null && required.length != null;
+  let sufficient = null;
   let waste = null;
-  if (knownDims && required.width != null && required.length != null) {
+  if (knownDims && hasDimensionalTarget) {
     sufficient =
       (p.rollWidth >= required.width && p.rollLength >= required.length) ||
       (p.rollWidth >= required.length && p.rollLength >= required.width);
     if (sufficient) waste = area - required.width * required.length;
-  } else if (knownDims && required.area != null) {
-    sufficient = area >= required.area;
-    if (sufficient) waste = area - required.area;
   }
+  // Tiering follows the verdict directly — cannot-verify (sufficient ===
+  // null) always sorts last, alongside genuinely-unknown-dims pieces, never
+  // into the sufficient tier.
   let tier;
-  if (!knownDims) tier = 2;
+  if (sufficient === true) tier = 0;
   else if (sufficient === false) tier = 1;
-  else tier = 0; // sufficient === true, or null (indeterminate — no target resolved)
-  return { ...p, knownDims, area, sufficient, waste, tier };
+  else tier = 2;
+  return { ...p, knownDims, area, sufficient, waste, tier, canVerifyDimensionally: hasDimensionalTarget };
 }
 
 // GET /api/cutting/work-orders/:id/available-material?cutWidth=&cutLength=
@@ -202,9 +315,11 @@ function scorePiece(p, required) {
 //
 // Sort priority (deliberately remnant-first within each tier — the business
 // wants existing offcuts consumed before a new roll is opened):
-//   1. pieces that can satisfy the cut, smallest first (least waste)
-//   2. pieces that cannot satisfy the cut, largest first
-//   3. pieces with unknown (genuinely empty) dimensions, always last
+//   1. verified sufficient (known dims, known W×L target), smallest first (least waste)
+//   2. verified insufficient (known dims, known W×L target), largest first
+//   3. cannot verify — genuinely unknown dims, OR known dims but no W×L
+//      target resolved (area-only BOM fallback / no target at all) —
+//      always last, never tier 1
 router.get("/work-orders/:id/available-material", async (req, res, next) => {
   try {
     const wo = await getWorkOrderDetail(req.params.id);
@@ -221,15 +336,28 @@ router.get("/work-orders/:id/available-material", async (req, res, next) => {
     // matching a location's name/code) — material sitting in one (e.g. an
     // IN-TRANSIT system bin mid-transfer) can't actually be picked up.
     const pickableNodes = nodes.filter((n) => isRealStorageBin(n.warehouseLocation?.type));
-    const pieces = pickableNodes.map(withParsedDimensions).map((p) => {
-      const required = resolveRequiredCut({
-        cutWidth,
-        cutLength,
-        itemName: wo.job?.item?.name,
-        quantityPerUnit: quantityPerUnitByItemId.get(p.itemId),
+    const allPieces = pickableNodes.map(withParsedDimensions);
+    // Allowlist gate (see SOURCE_PIECE_TYPE_ALLOWLIST): a Cut Rug/Finished
+    // Rug/unrecognized/missing Piece Type is already committed to another
+    // job or of unknown status and must never appear as selectable source
+    // stock, no matter how well its dimensions would otherwise score.
+    const noPieceTypeCount = allPieces.filter((p) => !p.pieceType).length;
+    if (noPieceTypeCount > 0) {
+      console.warn(
+        `available-material: excluded ${noPieceTypeCount} piece(s) with no Piece Type set (work order ${req.params.id})`
+      );
+    }
+    const pieces = allPieces
+      .filter((p) => isAllowedSourcePieceType(p.pieceType))
+      .map((p) => {
+        const required = resolveRequiredCut({
+          cutWidth,
+          cutLength,
+          itemName: wo.job?.item?.name,
+          quantityPerUnit: quantityPerUnitByItemId.get(p.itemId),
+        });
+        return { ...scorePiece(p, required), requiredCut: required };
       });
-      return { ...scorePiece(p, required), requiredCut: required };
-    });
 
     pieces.sort((a, b) => {
       if (a.tier !== b.tier) return a.tier - b.tier;
@@ -290,11 +418,28 @@ router.get("/scan/:serial", async (req, res, next) => {
       await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "not_found" });
       return res.status(404).json({ error: `No label found for scancode "${sanitizedValue}"` });
     }
+    const piece = withParsedDimensions(inventory);
+    if (!isAllowedSourcePieceType(piece.pieceType)) {
+      // A direct scan bypasses the available-material list entirely, so the
+      // allowlist gate has to be re-checked here too (see
+      // SOURCE_PIECE_TYPE_ALLOWLIST) — otherwise an operator could scan a
+      // Cut Rug already picked into someone else's job straight past the
+      // filtered list and cut into it.
+      const typeDescription = piece.pieceType ? `is "${piece.pieceType}"` : "has no Piece Type set";
+      await logScanAttempt({
+        workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "rejected_piece_type",
+        resolvedInventoryId: inventory.id,
+        errorMessage: `Piece Type ${piece.pieceType || "(none)"} is not eligible source stock`,
+      });
+      return res.status(409).json({
+        error: `Label #${piece.labelNumber} ${typeDescription} and cannot be used as source stock for a cut.`,
+      });
+    }
     await logScanAttempt({
       workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "resolved",
       resolvedInventoryId: inventory.id,
     });
-    res.json(withParsedDimensions(inventory));
+    res.json(piece);
   } catch (err) {
     await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "exact_scancode", outcome: "not_found", errorMessage: err.message });
     next(err);
@@ -312,13 +457,23 @@ router.get("/search", async (req, res, next) => {
   const workOrderId = req.query.workOrderId || null;
   try {
     const { matchType, results } = await searchInventories(sanitizedValue);
-    const outcome = results.length === 0 ? "not_found" : matchType === "exact_label_number" && results.length === 1 ? "resolved" : "shown_for_selection";
+    const allPieces = results.map(withParsedDimensions);
+    // Same allowlist gate as available-material (see
+    // SOURCE_PIECE_TYPE_ALLOWLIST) — a Cut Rug/Finished Rug/unrecognized/
+    // missing Piece Type is dropped from the results list rather than shown
+    // as a pickable match, even for an otherwise-exact Label # hit.
+    const noPieceTypeCount = allPieces.filter((p) => !p.pieceType).length;
+    if (noPieceTypeCount > 0) {
+      console.warn(`search: excluded ${noPieceTypeCount} result(s) with no Piece Type set (query "${sanitizedValue}")`);
+    }
+    const filteredPieces = allPieces.filter((p) => isAllowedSourcePieceType(p.pieceType));
+    const outcome = filteredPieces.length === 0 ? "not_found" : matchType === "exact_label_number" && filteredPieces.length === 1 ? "resolved" : "shown_for_selection";
     await logScanAttempt({
       workOrderId, rawValue, sanitizedValue, method: matchType, outcome,
-      resolvedInventoryId: outcome === "resolved" ? results[0].id : undefined,
-      matchCount: results.length,
+      resolvedInventoryId: outcome === "resolved" ? filteredPieces[0].id : undefined,
+      matchCount: filteredPieces.length,
     });
-    res.json({ matchType, results: results.map(withParsedDimensions) });
+    res.json({ matchType, results: filteredPieces });
   } catch (err) {
     await logScanAttempt({ workOrderId, rawValue, sanitizedValue, method: "text_search", outcome: "not_found", errorMessage: err.message });
     next(err);
@@ -347,6 +502,41 @@ router.get("/bins/default", async (_req, res) => {
     res.status(404).json({
       error: `REMNANT_BIN_NAME "${REMNANT_BIN_NAME}" does not match any bin in this org — pick a remnant bin manually.`,
     });
+  }
+});
+
+// PDF metadata title — shown by a PDF viewer/print dialog in place of this
+// file's URL (see print/artifact.js's header comment on why that matters).
+function labelPdfTitle(inventory) {
+  return `${LABEL_NAME} — ${inventory.item?.name ?? "item"} #${inventory.scanCodeNumber} (${inventory.scanCodeSerialNumber})`;
+}
+
+// Renders + rasterizes a label for a live inventory record, returning the
+// byte artifact plus what's needed for logging/preview. Shared by the
+// standalone preview route below and the reprint route.
+async function renderLabelArtifact(inventoryId, format) {
+  const inventory = await getInventoryById(inventoryId);
+  if (!inventory) throw new Error(`Inventory ${inventoryId} not found`);
+  const { canvas, widthIn, heightIn, encodedBarcodeValue, resolvedBindings } = await renderLabel({
+    item: inventory.item,
+    inventory,
+  });
+  const buffer = await canvasToArtifact(canvas, format, { widthIn, heightIn, title: labelPdfTitle(inventory) });
+  return { buffer, encodedBarcodeValue, resolvedBindings, inventory };
+}
+
+// GET /api/cutting/labels/:inventoryId/render?format=pdf|png — standalone
+// preview/download, independent of the commit flow. Always uses ArtifactSink
+// (hands the bytes straight back) — this route never dispatches to a
+// physical printer, see /print/sink.js.
+router.get("/labels/:inventoryId/render", async (req, res, next) => {
+  const format = req.query.format === "png" ? "png" : "pdf";
+  try {
+    const { buffer } = await renderLabelArtifact(req.params.inventoryId, format);
+    res.setHeader("Content-Type", format === "png" ? "image/png" : "application/pdf");
+    res.send(buffer);
+  } catch (err) {
+    next(err);
   }
 });
 
@@ -412,6 +602,28 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     const jobId = wo.job?.id;
 
     const source = await getInventoryById(sourceInventoryId);
+    // Geometry boundary guard (see SCHEMA_NOTES.md's canonical unit-basis
+    // rule): fail the whole commit up front, before any split/write, if this
+    // item's stock UoM isn't a recognized area unit — never silently assume
+    // Roll Length/Width are in feet.
+    requireLinearUnit(source.item);
+
+    // Label-template gate — checked BEFORE any split/write, not at the print
+    // step. Printing is opt-in per item in Digit (Item.defaultCustomLabelConfigurations
+    // .manualInventory — see SCHEMA_NOTES.md), and variants don't inherit
+    // their parent item's config (live-confirmed 2026-08-24), so this recurs
+    // every time someone adds a variant without configuring it. A cut that
+    // cannot produce a tag must never complete and hand an untagged piece to
+    // the rack — block the whole commit here rather than no-op the print
+    // step later. ALLOW_PRINTLESS_COMMITS is the only sanctioned bypass, for
+    // orgs that genuinely don't print.
+    if (!ALLOW_PRINTLESS_COMMITS && !(await getLabelTemplateForItem(source.item.id))) {
+      throw new Error(
+        `No "${LABEL_NAME}" label template configured for item "${source.item.name}" — commit blocked, this cut cannot produce a tag. ` +
+          `Configure a manual-inventory label for this item in Digit's Label Designer, or set ALLOW_PRINTLESS_COMMITS=true if this org does not print labels.`
+      );
+    }
+
     const sourceDims = readInventoryCustomFields(source);
     const sourceScancode = source.scanCodeSerialNumber;
     const sourceWidth = sourceDims.rollWidth;
@@ -466,7 +678,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
       const digit = await writeInventoryDimensions(workingPiece.id, {
         rollLength: cutLength,
         rollWidth: cutWidth,
-        pieceType: "Cut Piece",
+        pieceType: WORKING_PIECE_TYPE,
         parentRollScancode: sourceScancode,
       });
       return { detail: `Roll Length=${cutLength}, Roll Width=${cutWidth}`, digit };
@@ -520,6 +732,104 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
       return { detail: "Status set to IN_PROGRESS", digit };
     });
 
+    // Printing happens last, after every inventory operation has already
+    // succeeded — a print failure here can never roll back or invalidate
+    // the cut itself (nothing above this point is undone; see
+    // SCHEMA_NOTES.md). Same failure semantics as every other step (stop on
+    // first failure, no auto-retry) — the difference is purely in how the
+    // frontend frames a failure here: "reprint from History", never "needs
+    // manual repair in Digit" (see CutScreen.jsx's repairMessage).
+    //
+    // Working piece + remnant are one print job, not two — a single
+    // multi-page PDF (one page per tag) through one sink.deliver() call, so
+    // the operator confirms one print dialog, not two. Both pieces are
+    // always the same Digit item as the source (a split never changes
+    // Item), so one template-resolved check covers both.
+    //
+    // No station is selected, passed, or looked up here — the UI no longer
+    // offers a station picker (see resolveSinkForStation's header comment
+    // in print/sink.js), so this always resolves to BrowserPrintSink.
+    let workingPiecePrintStatus = null;
+    let workingPiecePrintError = null;
+    let remnantPrintStatus = null;
+    let remnantPrintError = null;
+    let printedPdfBase64 = null;
+    let printedPageCount = 0;
+
+    const piecesToPrint = [workingPiece, remnant].filter(Boolean);
+
+    await runStep("printLabels", `Print ${LABEL_NAME} label${piecesToPrint.length > 1 ? "s" : ""}`, async () => {
+      if (!piecesToPrint.length) throw new Error("No pieces were created — nothing to print");
+      try {
+        const fullPieces = await Promise.all(piecesToPrint.map((p) => getInventoryById(p.id)));
+        // The commit-wide gate above already blocked this whole cut unless
+        // either a template resolved or ALLOW_PRINTLESS_COMMITS is set — the
+        // only way to reach this with no template is the latter, so this is
+        // a sanctioned no-op, never a silent one.
+        if (!(await getLabelTemplateForItem(fullPieces[0].item.id))) {
+          return {
+            detail: `No "${LABEL_NAME}" label configured for item "${fullPieces[0].item.name}" — nothing to print (ALLOW_PRINTLESS_COMMITS is set).`,
+          };
+        }
+        const rendered = [];
+        for (const inv of fullPieces) {
+          // The working piece's quantityInStock is already zeroed by
+          // pickJobItem (below) by the time this runs — printing that live
+          // value would put "Quantity 0" on a tag for a piece that's
+          // physically the full cut area. Bind its tag to the cut area
+          // instead, which this commit already computed; the remnant is a
+          // real, un-picked label, so it keeps showing its own live
+          // quantity (no override).
+          const quantityOverride = inv.id === workingPiece?.id ? cutArea : undefined;
+          const { canvas, widthIn, heightIn, encodedBarcodeValue } = await renderLabel({ item: inv.item, inventory: inv, quantityOverride });
+          rendered.push({ inv, canvas, widthIn, heightIn, encodedBarcodeValue });
+        }
+        const title = `${LABEL_NAME} — ${rendered.map((r) => r.inv.scanCodeSerialNumber).join(", ")}`;
+        const buffer = await renderLabelPdf(
+          rendered.map((r) => ({ canvas: r.canvas, widthIn: r.widthIn, heightIn: r.heightIn })),
+          { title }
+        );
+        const sink = resolveSinkForStation();
+        const result = await sink.deliver({
+          buffer,
+          format: "pdf",
+          meta: { labelName: LABEL_NAME, pageCount: rendered.length },
+        });
+        workingPiecePrintStatus = "printed";
+        if (remnant) remnantPrintStatus = "printed";
+        // Not persisted into cut_events.steps (see below, near writeEvent) —
+        // reprint always re-renders fresh rather than storing bytes, and
+        // this stream-only field would otherwise duplicate the PDF into the
+        // audit row on every commit.
+        if (result.buffer && result.format === "pdf") {
+          printedPdfBase64 = result.buffer.toString("base64");
+          printedPageCount = rendered.length;
+        }
+        const pieceSummaries = rendered
+          .map((r) => `#${r.inv.scanCodeNumber} (${r.inv.scanCodeSerialNumber}), barcode "${r.encodedBarcodeValue}"`)
+          .join("; ");
+        return {
+          detail: `${result.detail} — ${pieceSummaries} (browser print dialog — pick a printer)`,
+        };
+      } catch (err) {
+        workingPiecePrintStatus = "failed";
+        workingPiecePrintError = err.message;
+        if (remnant) {
+          remnantPrintStatus = "failed";
+          remnantPrintError = err.message;
+        }
+        throw err;
+      }
+    });
+
+    // Streamed separately from the checklist steps above (never pushed into
+    // `steps`, so it never lands in cut_events — reprint always re-renders
+    // fresh rather than storing bytes in the audit trail). The frontend
+    // opens this as a real PDF and triggers the browser print dialog once.
+    if (printedPdfBase64) {
+      writeEvent(res, { key: "printPdf", status: "ok", format: "pdf", pageCount: printedPageCount, pdfBase64: printedPdfBase64 });
+    }
+
     const status = failedStep ? "partial_failure" : "completed";
 
     let cutEventId = null;
@@ -534,8 +844,10 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
            source_width_after, source_length_after,
            working_piece_inventory_id, working_piece_scancode,
            remnant_inventory_id, remnant_scancode,
-           status, failed_step, steps, notes, area_uom_symbol
-         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27, $28, $29)
+           status, failed_step, steps, notes, area_uom_symbol,
+           print_station_id, working_piece_print_status, working_piece_print_error,
+           remnant_print_status, remnant_print_error
+         ) VALUES ($1,$2,$3,$4,$5, $6,$7,$8,$9, $10,$11,$12, $13,$14,$15,$16,$17,$18, $19,$20, $21,$22, $23,$24, $25,$26,$27, $28, $29, $30,$31,$32, $33,$34)
          RETURNING id`,
         [
           operatorName || null, workOrderId, wo.workOrderNumber, jobId, wo.job?.documentNumber || wo.job?.jobNumber,
@@ -546,6 +858,8 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
           workingPiece?.id || null, workingPiece?.scanCodeSerialNumber || null,
           remnant?.id || null, remnant?.scanCodeSerialNumber || null,
           status, failedStep, JSON.stringify(steps), notes || null, sourceAreaUom?.symbol || null,
+          null, workingPiecePrintStatus, workingPiecePrintError, // print_station_id — no station in the commit path anymore
+          remnantPrintStatus, remnantPrintError,
         ]
       );
       cutEventId = rows[0].id;
@@ -594,6 +908,78 @@ router.get("/history", async (req, res, next) => {
     );
     res.json(rows);
   } catch (err) {
+    next(err);
+  }
+});
+
+// POST /api/cutting/history/:cutEventId/reprint — retry a print that failed
+// (or reprint a working piece/remnant label at any time). This never
+// touches the underlying cut or its inventory operations — those already
+// succeeded and this route doesn't re-run any of them, it only re-renders
+// and re-delivers a label for a piece this cut already created.
+router.post("/history/:cutEventId/reprint", async (req, res, next) => {
+  try {
+    const { piece } = req.body || {};
+    if (piece !== "workingPiece" && piece !== "remnant") {
+      return res.status(400).json({ error: `piece must be "workingPiece" or "remnant"` });
+    }
+    const db = assertDb();
+    const { rows } = await db.query("SELECT * FROM cut_events WHERE id = $1", [req.params.cutEventId]);
+    const event = rows[0];
+    if (!event) return res.status(404).json({ error: "Cut event not found" });
+
+    const inventoryId = piece === "workingPiece" ? event.working_piece_inventory_id : event.remnant_inventory_id;
+    if (!inventoryId) return res.status(400).json({ error: `This cut has no ${piece} label to reprint` });
+
+    // Same sink resolution and page setup as the commit flow — a reprint is
+    // always a single label, so a single-page PDF (see renderLabelPdf). The
+    // working piece's quantityInStock is still (and forever) zero post-pick
+    // — same quantityOverride reasoning as the commit flow's printLabels
+    // step, using the cut_area this event already recorded. The remnant's
+    // own inventory record was never picked, so it keeps its live quantity.
+    //
+    // No station here either — same as commit, this always resolves to
+    // BrowserPrintSink (see resolveSinkForStation, print/sink.js).
+    const fullInventory = await getInventoryById(inventoryId);
+    const quantityOverride = piece === "workingPiece" ? Number(event.cut_area) : undefined;
+    const { canvas, widthIn, heightIn, encodedBarcodeValue } = await renderLabel({
+      item: fullInventory.item,
+      inventory: fullInventory,
+      quantityOverride,
+    });
+    const buffer = await canvasToArtifact(canvas, "pdf", { widthIn, heightIn, title: labelPdfTitle(fullInventory) });
+    const sink = resolveSinkForStation();
+    const result = await sink.deliver({
+      buffer,
+      format: "pdf",
+      meta: { labelName: LABEL_NAME, inventoryId, scancode: fullInventory.scanCodeSerialNumber },
+    });
+
+    const statusCol = piece === "workingPiece" ? "working_piece_print_status" : "remnant_print_status";
+    const errorCol = piece === "workingPiece" ? "working_piece_print_error" : "remnant_print_error";
+    await db.query(`UPDATE cut_events SET ${statusCol} = $1, ${errorCol} = $2 WHERE id = $3`, ["printed", null, event.id]);
+
+    res.json({
+      delivered: true,
+      detail:
+        `${result.detail} — Label #${fullInventory.scanCodeNumber} (${fullInventory.scanCodeSerialNumber}), barcode encodes "${encodedBarcodeValue}"` +
+        " (browser print dialog — pick a printer)",
+      // Not persisted — rendered fresh on every reprint, same as the commit
+      // flow's printPdf event. Only present when the sink actually hands
+      // bytes back (browser/artifact sinks); a real NetworkPrinterSink
+      // wouldn't have anything to hand the frontend.
+      ...(result.buffer && result.format === "pdf" ? { pdfBase64: result.buffer.toString("base64") } : {}),
+    });
+  } catch (err) {
+    try {
+      const db = assertDb();
+      const { piece } = req.body || {};
+      const statusCol = piece === "workingPiece" ? "working_piece_print_status" : "remnant_print_status";
+      const errorCol = piece === "workingPiece" ? "working_piece_print_error" : "remnant_print_error";
+      await db.query(`UPDATE cut_events SET ${statusCol} = $1, ${errorCol} = $2 WHERE id = $3`, ["failed", err.message, req.params.cutEventId]);
+    } catch {
+      // best-effort status update only — the real error still gets returned below
+    }
     next(err);
   }
 });

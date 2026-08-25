@@ -29,6 +29,7 @@ services:
       CUTTING_STEP_NAME: ${CUTTING_STEP_NAME:-Cut to Size}
       REMNANT_BIN_NAME: ${REMNANT_BIN_NAME:-Remnant Storage}
       DIGIT_APP_BASE_URL: ${DIGIT_APP_BASE_URL:-https://app.digit-software.com}
+      ALLOW_PRINTLESS_COMMITS: ${ALLOW_PRINTLESS_COMMITS:-false}
     ports:
       - "${BACKEND_PORT:-4001}:4001"
     depends_on:
