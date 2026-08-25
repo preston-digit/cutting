@@ -7,7 +7,7 @@ kept in sync via cPanel's **Git Version Control** feature pulling from this
 repo's `deploy` branch. Local dev (`docker compose up --build`) is unchanged
 by any of this.
 
-## Two gotchas that cost real time — read these before doing anything else
+## Three gotchas that cost real time — read these before doing anything else
 
 ### 1. The frontend Docker container serves a stale `vite.config.js`
 
@@ -47,6 +47,37 @@ commit):
   contain a credential-bearing clone URL) from being served over HTTP.
   Verified after the fix: `/cutting/app/.git/config` and `/cutting/app/.git/HEAD`
   both still return 403.
+
+### 3. Clearing the working tree for the orphan `deploy` branch must NOT be a bare recursive delete
+
+**This actually happened, not a hypothetical**: building the `deploy` branch
+the first time, the working tree was cleared with
+```bash
+find . -mindepth 1 -maxdepth 1 ! -name '.git' -exec rm -rf {} +
+```
+to wipe everything except `.git` before placing the built output at the
+branch root. This command does not know about `.gitignore` and does not
+distinguish "tracked, git can restore it" from "ignored, git has never seen
+it and cannot bring it back." It deleted `.env` at the repo root along with
+everything else. Switching back to `main` afterward restored every
+*tracked* file (source, `.gitignore`, `.env.example`, ...) but had nothing
+to restore `.env` from, since git never had a copy of it. **It was
+unrecoverable** — no stopped container, cache, or git object held the old
+value, and the token had to be re-entered by hand.
+
+**Fix — use git's own tooling, which already knows the difference:**
+```bash
+git checkout --orphan deploy
+git rm -rf --cached .
+git clean -fd
+```
+`git rm -rf --cached .` unstages every tracked file (doesn't touch the
+working tree yet); `git clean -fd` then removes only *untracked, unignored*
+files and directories — anything matching `.gitignore` (`.env`, `node_modules/`,
+etc.) is left alone by default. This is the git-native way to get an empty
+tree without a bare `rm -rf`. Never run an unscoped recursive delete against
+the working tree for this or any other step — if a step seems to call for
+one, stop and ask first rather than reaching for `find`/`rm -rf`.
 
 ## Backend → Heroku
 
@@ -197,7 +228,8 @@ produce anything servable.
    ```bash
    git checkout --orphan deploy      # only the first time; branch persists after
    git rm -rf --cached .
-   # wipe the working tree except .git, then copy frontend/dist/*'s contents to the root
+   git clean -fd                    # git-native clear — see gotcha #3, NOT a bare rm -rf
+   # copy frontend/dist/*'s contents to the root
    git add -A
    git commit -m "Deploy: built static output for /cutting/app/"
    git push origin deploy
