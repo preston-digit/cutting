@@ -61,6 +61,11 @@
   --color-scanner-status-bg: rgba(0, 0, 0, 0.65);
   --color-scanner-status-fg: #ffffff;
 
+  /* Print preview modal — a document preview, not a camera overlay, so
+     unlike the scanner modal above this respects theme like normal page
+     chrome (see [data-theme="light"] below for the light-mode values). */
+  --color-print-modal-backdrop: rgba(0, 0, 0, 0.7);
+
   /* Layout */
   --row-height: 56px;
   --space-1: 4px;
@@ -114,6 +119,10 @@
   --color-scanner-shadow: rgba(0, 0, 0, 0.35);
   --color-scanner-status-bg: rgba(0, 0, 0, 0.65);
   --color-scanner-status-fg: #ffffff;
+
+  /* Print preview modal — lighter dimming on a light page than the dark
+     theme needs, same as a typical light-mode dialog backdrop. */
+  --color-print-modal-backdrop: rgba(0, 0, 0, 0.35);
 }
 
 /* No outer chrome — the host ERP shell provides the frame. */
@@ -462,6 +471,63 @@ body {
   position: absolute;
   top: var(--space-2);
   right: var(--space-2);
+}
+
+/* --- PDF print preview modal --------------------------------------------
+   Visible on purpose (see printPdf.js) — the operator prints from the PDF
+   viewer's own toolbar, so both the modal and the embedded viewer's own
+   controls need to be easy to find at a glance from a cutting table, not
+   hunted for. */
+.print-modal-backdrop {
+  position: fixed;
+  inset: 0;
+  background: var(--color-print-modal-backdrop);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  z-index: 1000;
+  padding: var(--space-5);
+}
+.print-modal {
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 92vw);
+  height: min(900px, 90vh);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-card);
+  overflow: hidden;
+}
+.print-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-3) var(--space-4);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+.print-modal-title {
+  font-weight: 600;
+  font-size: var(--fs-lg);
+}
+.print-modal-hint {
+  padding: var(--space-2) var(--space-4);
+  color: var(--color-muted);
+  font-size: var(--fs-sm);
+  border-bottom: 1px solid var(--color-border);
+  flex-shrink: 0;
+}
+.print-modal-frame-wrap {
+  flex: 1;
+  min-height: 0;
+  background: var(--color-surface-2);
+}
+.print-modal-frame {
+  width: 100%;
+  height: 100%;
+  border: 0;
+  display: block;
 }
 
 .warning-box {
