@@ -65,3 +65,25 @@ Width was unaffected on all three.
 | 119 | splt_17876159531 | 10.00 → 7.00 | 4.00 (unchanged) |
 | 126 | splt_17876164847 | 2.00 → 1.00 | 8.00 (unchanged) |
 | 130 | splt_17876165593 | 2.00 → 1.00 | 8.00 (unchanged) |
+
+## Production cuts (not cleanup candidates — real work, recorded for traceability)
+
+Unlike the sections above, these are **not** archive/cleanup candidates —
+this is a legitimate real cut, run by an operator through the deployed app
+embedded in Digit's UI (`app.digit-software.com`), not a smoke test. Nothing
+here needs action; recorded here only so there's one place tracking every
+real record this app has created or modified in the live org. Read directly
+from the `cut_events` row in Heroku Postgres (`cut_events.id = 1`), not
+assumed.
+
+| Field | Value |
+|---|---|
+| Work order | WO145 / MO25 |
+| Source label | #22 (`rcv_17870697201822`) |
+| Source Roll Length before → after | **40.00 → 30.00** |
+| Source Roll Width | 15.00 (unchanged) |
+| Cut width × length | 8 × 10 |
+| Working piece | **#141** (`splt_17876217283`), Piece Type Cut Rug |
+| Remnant | **#142** (`splt_17876217285`), area 70 ft² |
+| Commit status | `completed` |
+| Print status (working piece / remnant) | `printed` / `printed` — the backend's render+delivery step succeeded; a separate client-side print-dialog failure occurred after this and is tracked outside `cut_events` (see the diagnosis below) |
