@@ -13,7 +13,7 @@ function StatusPill({ status }) {
 // long after a clean commit, and there's nothing Digit-side to "fix" either
 // way (see CutScreen.jsx's repairMessage). null print status just means
 // "not attempted" (no side remnant, or a pre-print-feature row).
-function ReprintButton({ cutEventId, piece, printStatus, printError }) {
+function ReprintButton({ cutEventId, piece, printStatus, printError, scancode }) {
   const [busy, setBusy] = useState(false);
   const [result, setResult] = useState(null);
 
@@ -25,7 +25,8 @@ function ReprintButton({ cutEventId, piece, printStatus, printError }) {
       setResult({ ok: true, detail: res.detail });
       if (res.pdfBase64) {
         printPdfBase64(res.pdfBase64, {
-          onError: (err) => setResult({ ok: false, detail: `Rendered but couldn't open the print dialog: ${err.message}` }),
+          labelName: scancode,
+          onError: (err) => setResult({ ok: false, detail: `Couldn't display the label for printing: ${err.message}` }),
         });
       }
     } catch (err) {
@@ -121,6 +122,7 @@ export default function History({ nav }) {
                     piece="workingPiece"
                     printStatus={e.working_piece_print_status}
                     printError={e.working_piece_print_error}
+                    scancode={e.working_piece_scancode}
                   />
                 )}
               </div>
@@ -132,6 +134,7 @@ export default function History({ nav }) {
                     piece="remnant"
                     printStatus={e.remnant_print_status}
                     printError={e.remnant_print_error}
+                    scancode={e.remnant_scancode}
                   />
                 )}
               </div>

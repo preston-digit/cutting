@@ -446,9 +446,13 @@ export default function CutScreen({ nav, workOrderId }) {
           }
           if (event.key === "printPdf") {
             // Streamed separately from the checklist steps (see routes.js —
-            // never persisted to cut_events); open the real PDF and trigger
-            // the browser's native print dialog once, covering both tags.
-            printPdfBase64(event.pdfBase64, { onError: (err) => setCommitError(`Rendered but couldn't open the print dialog: ${err.message}`) });
+            // never persisted to cut_events); shows the rendered PDF (both
+            // tags, one multi-page document) in a visible preview modal for
+            // the operator to print from the viewer's own controls.
+            printPdfBase64(event.pdfBase64, {
+              labelName: wo.itemName,
+              onError: (err) => setCommitError(`Couldn't display the label for printing: ${err.message}`),
+            });
             return;
           }
           setSteps((prev) => prev.map((s) => (s.key === event.key ? { ...s, ...event } : s)));
