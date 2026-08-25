@@ -4,13 +4,20 @@
   "private": true,
   "type": "module",
   "main": "src/index.js",
+  "engines": {
+    "node": "20.x"
+  },
   "scripts": {
     "start": "node src/index.js",
-    "dev": "node --watch src/index.js"
+    "dev": "node --watch src/index.js",
+    "test": "node --test src"
   },
   "dependencies": {
+    "@napi-rs/canvas": "^0.1.53",
+    "bwip-js": "^4.5.1",
     "cors": "^2.8.5",
     "express": "^4.19.2",
+    "pdfkit": "^0.15.0",
     "pg": "^8.12.0"
   }
 }
