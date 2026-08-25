@@ -1,0 +1,9 @@
+# index.html must never be cached — this app is embedded in an iframe that
+# kept serving a stale index.html after a deploy, so new content-hashed
+# asset filenames under assets/ (which stay safely cacheable — a changed
+# file always gets a new hash) were never picked up.
+<IfModule mod_headers.c>
+  <Files "index.html">
+    Header set Cache-Control "no-store"
+  </Files>
+</IfModule>
