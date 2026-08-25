@@ -7,7 +7,7 @@ kept in sync via cPanel's **Git Version Control** feature pulling from this
 repo's `deploy` branch. Local dev (`docker compose up --build`) is unchanged
 by any of this.
 
-## Three gotchas that cost real time — read these before doing anything else
+## Five gotchas that cost real time — read these before doing anything else
 
 ### 1. The frontend Docker container serves a stale `vite.config.js`
 
@@ -78,6 +78,31 @@ etc.) is left alone by default. This is the git-native way to get an empty
 tree without a bare `rm -rf`. Never run an unscoped recursive delete against
 the working tree for this or any other step — if a step seems to call for
 one, stop and ask first rather than reaching for `find`/`rm -rf`.
+
+### 4. The print path can't use Chrome's PDF viewer at all inside Digit's embedding
+
+The original print flow rendered a PDF and displayed/printed it via Chrome's
+built-in PDF viewer. Confirmed directly (not assumed): Chrome refuses to
+instantiate that viewer under any sandboxed ancestor frame, which Digit's
+embedding iframe is — `allow-popups-to-escape-sandbox` on Digit's iframe
+would let a popup escape that and restore the PDF-viewer path, but that's
+Digit's markup, not this repo's. The fix (see `printPdf.js`) prints a PNG
+raster via our own `window.print()` and `@page` CSS instead, which sidesteps
+the PDF viewer entirely — but be aware an operator's print dialog set to
+"Fit to page" (or a non-default scale/paper size) can still override the
+`@page` size/margin guarantee, unlike the old PDF path where a page's size
+was fixed no matter what the dialog was set to.
+
+### 5. `docker compose exec` into the running dev container vs. `docker compose run` for a one-off build
+
+Running `npx vite build` via `docker compose exec` against the frontend
+container while its own `npm run dev` process is still running in the same
+container produces a misleading `Rollup failed to resolve "/src/main.jsx"`
+error that looks like a real config/source problem — it isn't; the build
+and the live dev server are fighting over the same container. Use
+`docker compose run --name <tmp-name> ...` (a fresh, separate container) for
+any one-off production build, then `docker cp` the result out and remove
+the container.
 
 ## Backend → Heroku
 

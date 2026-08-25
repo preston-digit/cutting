@@ -755,6 +755,7 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     let remnantPrintError = null;
     let printedPdfBase64 = null;
     let printedPageCount = 0;
+    let printedPngPages = null;
 
     const piecesToPrint = [workingPiece, remnant].filter(Boolean);
 
@@ -805,6 +806,19 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
           printedPdfBase64 = result.buffer.toString("base64");
           printedPageCount = rendered.length;
         }
+        // PNG rasters straight from the same canvas the PDF embeds — never
+        // rasterized from the PDF itself — for the frontend's print-preview
+        // modal (printPdf.js). One entry per tag; each carries its own
+        // labelWidthIn/labelHeightIn so the frontend's @page CSS is sized
+        // from the template, never hardcoded.
+        printedPngPages = await Promise.all(
+          rendered.map(async (r) => ({
+            pngBase64: (await canvasToArtifact(r.canvas, "png", {})).toString("base64"),
+            widthIn: r.widthIn,
+            heightIn: r.heightIn,
+            label: `Label #${r.inv.scanCodeNumber}`,
+          }))
+        );
         const pieceSummaries = rendered
           .map((r) => `#${r.inv.scanCodeNumber} (${r.inv.scanCodeSerialNumber}), barcode "${r.encodedBarcodeValue}"`)
           .join("; ");
@@ -825,9 +839,20 @@ router.post("/work-orders/:id/commit", async (req, res, next) => {
     // Streamed separately from the checklist steps above (never pushed into
     // `steps`, so it never lands in cut_events — reprint always re-renders
     // fresh rather than storing bytes in the audit trail). The frontend
-    // opens this as a real PDF and triggers the browser print dialog once.
+    // shows `pages` (PNGs) in a print-preview modal and prints via its own
+    // window.print() — see printPdf.js for why (Chrome's PDF viewer refuses
+    // to instantiate under Digit's sandboxed embedding). `pdfBase64` is kept
+    // for now (renderLabelPdf/BrowserPrintSink are unchanged) but the
+    // frontend no longer renders it.
     if (printedPdfBase64) {
-      writeEvent(res, { key: "printPdf", status: "ok", format: "pdf", pageCount: printedPageCount, pdfBase64: printedPdfBase64 });
+      writeEvent(res, {
+        key: "printPdf",
+        status: "ok",
+        format: "pdf",
+        pageCount: printedPageCount,
+        pdfBase64: printedPdfBase64,
+        pages: printedPngPages,
+      });
     }
 
     const status = failedStep ? "partial_failure" : "completed";
@@ -954,6 +979,9 @@ router.post("/history/:cutEventId/reprint", async (req, res, next) => {
       format: "pdf",
       meta: { labelName: LABEL_NAME, inventoryId, scancode: fullInventory.scanCodeSerialNumber },
     });
+    // Same PNG-from-canvas path as the commit flow's printPdf event — see
+    // printPdf.js for why the frontend prints from a PNG, not the PDF.
+    const pngBase64 = (await canvasToArtifact(canvas, "png", {})).toString("base64");
 
     const statusCol = piece === "workingPiece" ? "working_piece_print_status" : "remnant_print_status";
     const errorCol = piece === "workingPiece" ? "working_piece_print_error" : "remnant_print_error";
@@ -969,6 +997,7 @@ router.post("/history/:cutEventId/reprint", async (req, res, next) => {
       // bytes back (browser/artifact sinks); a real NetworkPrinterSink
       // wouldn't have anything to hand the frontend.
       ...(result.buffer && result.format === "pdf" ? { pdfBase64: result.buffer.toString("base64") } : {}),
+      pages: [{ pngBase64, widthIn, heightIn, label: `Label #${fullInventory.scanCodeNumber}` }],
     });
   } catch (err) {
     try {

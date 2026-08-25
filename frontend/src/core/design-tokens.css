@@ -473,11 +473,11 @@ body {
   right: var(--space-2);
 }
 
-/* --- PDF print preview modal --------------------------------------------
-   Visible on purpose (see printPdf.js) — the operator prints from the PDF
-   viewer's own toolbar, so both the modal and the embedded viewer's own
-   controls need to be easy to find at a glance from a cutting table, not
-   hunted for. */
+/* --- Label print preview modal -------------------------------------------
+   Shows the rendered PNG(s) and prints via our own window.print() — see
+   printPdf.js for why (Chrome's PDF viewer refuses to instantiate under
+   Digit's sandboxed embedding, confirmed directly, not assumed). The Print
+   button here is the one action that prints every tag. */
 .print-modal-backdrop {
   position: fixed;
   inset: 0;
@@ -518,16 +518,37 @@ body {
   border-bottom: 1px solid var(--color-border);
   flex-shrink: 0;
 }
-.print-modal-frame-wrap {
+.print-modal-preview {
   flex: 1;
   min-height: 0;
+  overflow-y: auto;
   background: var(--color-surface-2);
+  padding: var(--space-4);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-4);
+  justify-content: center;
+  align-content: flex-start;
 }
-.print-modal-frame {
-  width: 100%;
-  height: 100%;
-  border: 0;
+.print-preview-card {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-input);
+  padding: var(--space-3);
+}
+.print-preview-img {
+  max-width: 260px;
+  max-height: 60vh;
+  border: 1px solid var(--color-border);
   display: block;
+}
+.print-preview-caption {
+  color: var(--color-muted);
+  font-size: var(--fs-sm);
 }
 
 .warning-box {

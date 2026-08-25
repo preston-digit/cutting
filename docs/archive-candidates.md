@@ -87,3 +87,17 @@ assumed.
 | Remnant | **#142** (`splt_17876217285`), area 70 ft² |
 | Commit status | `completed` |
 | Print status (working piece / remnant) | `printed` / `printed` — the backend's render+delivery step succeeded; a separate client-side print-dialog failure occurred after this and is tracked outside `cut_events` (see the diagnosis below) |
+
+Second real production cut, same category — read directly from `cut_events.id = 2`:
+
+| Field | Value |
+|---|---|
+| Work order | WO157 / MO27 |
+| Source label | #11 (`mi_1787021535011`) |
+| Source Roll Length before → after | **80.00 → 70.00** |
+| Source Roll Width | 15.00 (unchanged) |
+| Cut width × length | 8 × 10 |
+| Working piece | **#145** (`splt_17876245030`), Piece Type Cut Rug |
+| Remnant | **#146** (`splt_17876245032`) |
+| Commit status | `completed` |
+| Print status (working piece / remnant) | `printed` / `printed` — same as above: the backend succeeded, the client-side render-in-modal step is what's under diagnosis (see SCHEMA_NOTES.md's print pipeline notes for the current state of that investigation) |

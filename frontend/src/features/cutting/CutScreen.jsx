@@ -10,7 +10,7 @@ import {
   getAvailableMaterial,
 } from "./api.js";
 import BarcodeScannerModal from "./BarcodeScannerModal.jsx";
-import { printPdfBase64 } from "./printPdf.js";
+import { printLabelPages } from "./printPdf.js";
 import {
   formatArea,
   formatQty,
@@ -446,10 +446,11 @@ export default function CutScreen({ nav, workOrderId }) {
           }
           if (event.key === "printPdf") {
             // Streamed separately from the checklist steps (see routes.js —
-            // never persisted to cut_events); shows the rendered PDF (both
-            // tags, one multi-page document) in a visible preview modal for
-            // the operator to print from the viewer's own controls.
-            printPdfBase64(event.pdfBase64, {
+            // never persisted to cut_events); shows the rendered label(s) as
+            // PNGs in a visible preview modal — one Print click covers both
+            // tags, each printing as its own page (see printPdf.js for why
+            // this isn't a PDF anymore).
+            printLabelPages(event.pages, {
               labelName: wo.itemName,
               onError: (err) => setCommitError(`Couldn't display the label for printing: ${err.message}`),
             });

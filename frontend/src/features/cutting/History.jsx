@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import { getHistory, reprintLabel } from "./api.js";
 import { formatArea, formatDims } from "./units.js";
-import { printPdfBase64 } from "./printPdf.js";
+import { printLabelPages } from "./printPdf.js";
 
 function StatusPill({ status }) {
   if (status === "completed") return <span className="pill pill--green">Completed</span>;
@@ -23,8 +23,8 @@ function ReprintButton({ cutEventId, piece, printStatus, printError, scancode })
     try {
       const res = await reprintLabel(cutEventId, piece);
       setResult({ ok: true, detail: res.detail });
-      if (res.pdfBase64) {
-        printPdfBase64(res.pdfBase64, {
+      if (res.pages) {
+        printLabelPages(res.pages, {
           labelName: scancode,
           onError: (err) => setResult({ ok: false, detail: `Couldn't display the label for printing: ${err.message}` }),
         });
